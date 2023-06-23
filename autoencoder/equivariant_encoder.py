@@ -47,9 +47,9 @@ class VAE(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
 
-    def decode(self, z):
+    def decode(self, z, edge_index):
         for decoder in self.decoders[::-1]:
-            z = decoder(z, None)
+            z = decoder(z, edge_index)
         return z
 
     def forward(self, x, edge_index):
@@ -58,7 +58,7 @@ class VAE(nn.Module):
         logvar = self.logvar_layer(z)
         z = self.reparameterize(mu, logvar)
         z = self.latent_decoder(z)
-        out = self.decode(z)
+        out = self.decode(z, edge_index)
         return out, mu, logvar
 
 
@@ -86,6 +86,7 @@ for filename in os.listdir(input_files_directory):
     if filename.endswith(".pt"):
         file_path = os.path.join(input_files_directory, filename)
         data = torch.load(file_path)
+        data = random_translate(data, translate_range)  # Data augmentation
         data_list.append(data)
 
 train_data = []
@@ -114,6 +115,9 @@ def loss_function(recon_x, x, mu, logvar):
     kl_divergence = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
     return reconstruction_loss + kl_divergence
 
+# Keeping track of losses for each epoch
+train_losses = []
+val_losses = []
 
 for epoch in range(num_epochs):
     model.train()
@@ -124,7 +128,7 @@ for epoch in range(num_epochs):
         edge_index = batch.edge_index
 
         outputs, mu, logvar = model(x, edge_index)
-        reconstruction_loss = loss_function(outputs[-1], x, mu, logvar)
+        reconstruction_loss = loss_function(outputs, x, mu, logvar)
 
         optimizer.zero_grad()
         reconstruction_loss.backward()
@@ -134,22 +138,29 @@ for epoch in range(num_epochs):
 
     average_loss = total_loss / len(train_loader.dataset)
     print(f"Epoch: {epoch + 1}/{num_epochs}, Average Loss: {average_loss}")
+    train_losses.append(average_loss)
 
     model.eval()
+    total_val_loss = 0.0
     with torch.no_grad():
-        total_val_loss = 0.0
         for batch in val_loader:
             x = batch.x
             edge_index = batch.edge_index
 
             outputs, mu, logvar = model(x, edge_index)
-            val_loss = loss_function(outputs[-1], x, mu, logvar)
+            val_loss = loss_function(outputs, x, mu, logvar)
 
             total_val_loss += val_loss.item() * x.size(0)
 
         avg_val_loss = total_val_loss / len(val_loader.dataset)
+        print(f"Validation Loss: {avg_val_loss}")
+        val_losses.append(avg_val_loss)
 
-    print(f"Validation Loss: {avg_val_loss}")
+# Save the losses for future analysis
+torch.save(train_losses, 'train_losses.pt')
+torch.save(val_losses, 'val_losses.pt')
+
+torch.save(model.state_dict(), 'best_model.pt')
 
 # Generate multiple levels of coarse-grained representations
 coarse_grained_reps = []
@@ -169,7 +180,7 @@ for level in range(num_levels):
             edge_index = batch.edge_index
 
             outputs, _, _ = model(x, edge_index)
-            last_level_output = outputs[-1]
+            last_level_output = outputs
 
             if last_level_output.numel() == 0:
                 continue
@@ -185,3 +196,34 @@ for level in range(num_levels):
 # Save the coarse-grained representations for each level
 for level, reps in enumerate(coarse_grained_reps):
     torch.save(reps, f'coarse_grained_reps_level_{level+1}.pt')
+
+# Load the new protein graph data
+new_protein_data = torch.load('new_protein.pt')
+
+# Apply the models on the new protein graph
+new_coarse_grained_reps = []
+for level in range(num_levels):
+    current_coarse_grain_dims = coarse_grain_dims[:level+1]
+
+    model = VAE(input_dim, hidden_dim, latent_dim, level+1, current_coarse_grain_dims, dropout_rate)
+    model.load_state_dict(torch.load('best_model.pt'))
+    model.eval()
+
+    x = new_protein_data.x
+    edge_index = new_protein_data.edge_index
+
+    with torch.no_grad():
+        outputs, _, _ = model(x, edge_index)
+        last_level_output = outputs
+
+        if last_level_output.numel() != 0:
+            batch_size = last_level_output.size(0)
+            new_batch = torch.arange(batch_size).to(x.device)
+            rep = global_mean_pool(last_level_output, new_batch)
+            new_coarse_grained_reps.append(rep)
+
+# Save the new coarse-grained representations
+for level, reps in enumerate(new_coarse_grained_reps):
+    torch.save(reps, f'new_protein_coarse_grained_reps_level_{level+1}.pt')
+
+

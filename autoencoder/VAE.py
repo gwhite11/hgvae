@@ -2,12 +2,18 @@ import torch
 import torch.nn as nn
 import random
 import os
+import numpy as np
 from torch_geometric.nn import GCNConv, TopKPooling, GATConv, global_mean_pool
 from torch_geometric.data import DataLoader
 
+# Set the seeds
 random_seed = 42
 random.seed(random_seed)
+np.random.seed(random_seed)
 torch.manual_seed(random_seed)
+torch.cuda.manual_seed(random_seed)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
 # Split the data into training, validation, and test sets
 train_data = []
@@ -21,13 +27,14 @@ batch_size = 32
 
 input_files_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//graph_data'
 data_list = []
-dataloader = DataLoader(data_list, batch_size=batch_size)
 for filename in os.listdir(input_files_directory):
     if filename.endswith(".pt"):
         file_path = os.path.join(input_files_directory, filename)
         data = torch.load(file_path)
         data_list.append(data)
 
+# Shuffle and split the data
+random.shuffle(data_list)
 num_examples = len(data_list)
 train_cutoff = int(train_ratio * num_examples)
 val_cutoff = train_cutoff + int(val_ratio * num_examples)
@@ -40,7 +47,7 @@ train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
 val_loader = DataLoader(val_data, batch_size=batch_size)
 test_loader = DataLoader(test_data, batch_size=batch_size)
 
-
+# Define the model
 class VAE(nn.Module):
     def __init__(self, input_dim, hidden_dim, latent_dim, num_levels, coarse_grain_dims, dropout_rate=0.5):
         super(VAE, self).__init__()
@@ -76,12 +83,12 @@ class VAE(nn.Module):
         self.logvar_layer = nn.Linear(coarse_grain_dims[-1], latent_dim)
         self.latent_decoder = nn.Linear(latent_dim, coarse_grain_dims[-1])
 
-    def encode(self, x, edge_index):
+    def encode(self, x, edge_index, batch):
         for encoder, dropout, pool in zip(self.encoders, self.dropout, self.pooling):
             x = dropout(x)
             x = encoder(x, edge_index)
             x, edge_index, _, batch, _, _ = pool(x, edge_index)
-        return x
+        return global_mean_pool(x, batch)
 
     def reparameterize(self, mu, logvar):
         std = torch.exp(0.5 * logvar)
@@ -90,17 +97,16 @@ class VAE(nn.Module):
 
     def decode(self, z):
         for decoder in self.decoders[::-1]:
-            z = decoder(z, None)
+            z = decoder(z)
         return z
 
-    def forward(self, x, edge_index):
-        z = self.encode(x, edge_index)
+    def forward(self, x, edge_index, batch):
+        z = self.encode(x, edge_index, batch)
         mu = self.mu_layer(z)
         logvar = self.logvar_layer(z)
         z = self.reparameterize(mu, logvar)
         z = self.latent_decoder(z)
-        out = self.decode(z)
-        return out, mu, logvar
+        return self.decode(z), mu, logvar
 
 
 def random_translate(data, translate_range):
@@ -148,28 +154,30 @@ for epoch in range(num_epochs):
         for batch in train_loader:
             x = batch.x
             edge_index = batch.edge_index
+            batch_ids = batch.batch
 
-            outputs, mu, logvar = model(x, edge_index)
-            reconstruction_loss = loss_function(outputs[-1], x, mu, logvar)
+            output, mu, logvar = model(x, edge_index, batch_ids)
+            reconstruction_loss = loss_function(output, x, mu, logvar)
 
             optimizer.zero_grad()
             reconstruction_loss.backward()
             optimizer.step()
 
-            total_loss += reconstruction_loss.item() * x.size(0)
+            total_loss += reconstruction_loss.item()
 
-        average_loss = total_loss / len(train_loader.dataset)
+        average_loss = total_loss / len(train_loader)
         print(f"Epoch: {epoch + 1}/{num_epochs}, Average Loss: {average_loss}")
 
-        model.eval()
+
         with torch.no_grad():
             total_val_loss = 0.0
             for batch in val_loader:
                 x = batch.x
                 edge_index = batch.edge_index
+                batch_ids = batch.batch
 
-                outputs, mu, logvar = model(x, edge_index)
-                val_loss = loss_function(outputs[-1], x, mu, logvar)
+                output, mu, logvar = model(x, edge_index, batch_ids)
+                val_loss = loss_function(output, x, mu, logvar)
 
                 total_val_loss += val_loss.item() * x.size(0)
 
@@ -192,12 +200,12 @@ for model in models:
     with torch.no_grad():
         current_coarse_grained_rep = []
 
-        for batch in dataloader:
+        for batch in train_loader:
             x = batch.x
             edge_index = batch.edge_index
 
-            outputs, _, _ = model(x, edge_index)
-            last_level_output = outputs[-1]
+            output, _, _ = model(x, edge_index)
+            last_level_output = output
 
             if last_level_output.numel() == 0:
                 continue
@@ -213,5 +221,40 @@ for model in models:
 # Save the CG reps for each level
 for level, reps in enumerate(coarse_grained_reps):
     torch.save(reps, f'coarse_grained_reps_level_{level+1}.pt')
+
+# Save the trained models
+model_paths = ['model_coarse.pt', 'model_coarser.pt', 'model_coarsest.pt']
+for i, model in enumerate(models):
+    torch.save(model.state_dict(), model_paths[i])
+
+# Load the trained models
+loaded_models = []
+for path in model_paths:
+    model = VAE(input_dim, hidden_dim, latent_dim, num_levels, coarse_grain_dims, dropout_rate)
+    model.load_state_dict(torch.load(path))
+    model.eval()
+    loaded_models.append(model)
+
+# Load the new protein graph data
+new_protein_data = torch.load('new_protein.pt')
+
+new_coarse_grained_reps = []
+for model in loaded_models:
+    model.eval()
+    with torch.no_grad():
+        x = new_protein_data.x
+        edge_index = new_protein_data.edge_index
+
+        output, _, _ = model(x, edge_index)
+        last_level_output = output
+
+        if last_level_output.numel() != 0:
+            batch_size = last_level_output.size(0)
+            new_batch = torch.arange(batch_size).to(x.device)
+            rep = global_mean_pool(last_level_output, new_batch)
+            new_coarse_grained_reps.append(rep)
+
+# Save the new coarse-grained representations
+torch.save(new_coarse_grained_reps, 'new_protein_coarse_grained_reps.pt')
 
 
