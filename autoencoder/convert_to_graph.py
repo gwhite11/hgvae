@@ -38,7 +38,7 @@ def pdb_to_torch_geometric(pdb_file, output_directory, distance_threshold=5.0):
 
 
 # Specify the path to your directory with pdb files
-pdb_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//pdb_files_3'
+pdb_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//pdb_files_4//output_data_5'
 
 # Specify the path to your output directory
 output_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//graph_data'
