@@ -4,9 +4,7 @@ import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
 
 
-# please note this is a basic outline - I don't have the files to test if it even runs yet
-# the basic idea is it should use transfer learning to assign the forcefield parameters
-# from amber to the CG model.
+# please note this is a basic outline - it is very very incomplete - more of an idea
 
 class GNNModel(nn.Module):
     def __init__(self, num_node_features, num_classes):
@@ -27,19 +25,20 @@ class GNNModel(nn.Module):
 
 
 # Create a sample protein graph dataset
-protein_graphs = [...]  # List of protein graphs (torch_geometric.data.Data objects)
-forcefield_params = [...]  # List of corresponding force field parameters (tensors)
+protein_graphs = [...]  # List  protein graphs (torch_geometric.data.Data objects)
+forcefield_params = [...]  # List corresponding force field parameters (will these be tensors?)
 
 # Convert the dataset to a PyTorch DataLoader
 dataset = list(zip(protein_graphs, forcefield_params))
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=True)
 
 # Instantiate the GNN model
-model = GNNModel(num_node_features=..., num_classes=...)  # Specify the appropriate values
+model = GNNModel(num_node_features=..., num_classes=...)  # put appropritate values here
 
 # Define the loss function and optimizer
 criterion = nn.MSELoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+num_epochs = 1000
 
 # Training loop
 for epoch in range(num_epochs):
@@ -56,7 +55,7 @@ for epoch in range(num_epochs):
         loss.backward()
         optimizer.step()
 
-# Inference on a fresh protein graph
+# Use model on a fresh protein graph
 fresh_protein_graph = ...  # Construct the fresh protein graph
 model.eval()
 with torch.no_grad():

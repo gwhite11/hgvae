@@ -9,6 +9,8 @@ random_seed = 42
 random.seed(random_seed)
 torch.manual_seed(random_seed)
 
+# This is the original code that I ran without problems (but without problems I mean it ended with code 0 rather than
+# it worked as intended - I only had 32 graphs at the time.
 
 class HierarchicalCoarseGraining(nn.Module):
     def __init__(self, input_dim, hidden_dim, num_levels, coarse_grain_dims, dropout_rate=0.5):

@@ -5,6 +5,8 @@ import numpy as np
 import os
 import glob
 
+# im not sure if I need to do this step for the graph creation - I was having problems adding data
+# augmentation to the model and thought this might help with overfitting?
 
 def pdb_to_torch_geometric(pdb_file, output_directory, distance_threshold=5.0, perturb_range=0.1):
     try:

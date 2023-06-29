@@ -1,5 +1,3 @@
-# please see the vae_current model!
-
 import torch
 import torch.nn as nn
 import random
@@ -7,6 +5,9 @@ import os
 import numpy as np
 from torch_geometric.nn import GCNConv, TopKPooling, GATConv, global_mean_pool
 from torch_geometric.data import DataLoader
+
+# Choose the device
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Set the seeds
 random_seed = 42
@@ -48,6 +49,7 @@ test_data = data_list[val_cutoff:]
 train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
 val_loader = DataLoader(val_data, batch_size=batch_size)
 test_loader = DataLoader(test_data, batch_size=batch_size)
+
 
 # Define the model
 class VAE(nn.Module):
@@ -163,13 +165,13 @@ for epoch in range(num_epochs):
 
             optimizer.zero_grad()
             reconstruction_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             total_loss += reconstruction_loss.item()
 
         average_loss = total_loss / len(train_loader)
         print(f"Epoch: {epoch + 1}/{num_epochs}, Average Loss: {average_loss}")
-
 
         with torch.no_grad():
             total_val_loss = 0.0
@@ -189,7 +191,7 @@ for epoch in range(num_epochs):
 
 # Define the testing function
 def test():
-    # not sure if I need a test here since there is not a 'ground truth' to test the CG reps against
+    # Add your testing code here
     pass
 
 # Call the test function after training
@@ -234,6 +236,7 @@ loaded_models = []
 for path in model_paths:
     model = VAE(input_dim, hidden_dim, latent_dim, num_levels, coarse_grain_dims, dropout_rate)
     model.load_state_dict(torch.load(path))
+    model = model.to(device)
     model.eval()
     loaded_models.append(model)
 
@@ -242,6 +245,7 @@ new_protein_data = torch.load('new_protein.pt')
 
 new_coarse_grained_reps = []
 for model in loaded_models:
+    model = model.to(device)
     model.eval()
     with torch.no_grad():
         x = new_protein_data.x
@@ -258,5 +262,3 @@ for model in loaded_models:
 
 # Save the new coarse-grained representations
 torch.save(new_coarse_grained_reps, 'new_protein_coarse_grained_reps.pt')
-
-
