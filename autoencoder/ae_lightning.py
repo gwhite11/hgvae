@@ -2,9 +2,10 @@ import torch
 import torch.nn as nn
 import random
 import os
-from torch_geometric.nn import GCNConv, TopKPooling, GATConv, global_mean_pool
+from torch_geometric.nn import GCNConv, TopKPooling, GATConv
 from torch_geometric.data import DataLoader, Data
 from sklearn.decomposition import PCA
+from sklearn.cluster import AgglomerativeClustering
 import numpy as np
 import pytorch_lightning as pl
 
@@ -21,6 +22,8 @@ class HierarchicalCoarseGraining(pl.LightningModule):
         self.decoders = nn.ModuleList()
         self.pooling = nn.ModuleList()
         self.dropout = nn.ModuleList()
+        self.num_levels = num_levels
+        self.coarse_grain_dims = coarse_grain_dims
 
         for level in range(num_levels):
             input_dim_level = input_dim if level == 0 else coarse_grain_dims[level - 1]
@@ -42,6 +45,8 @@ class HierarchicalCoarseGraining(pl.LightningModule):
             pool = TopKPooling(latent_dim)
             self.pooling.append(pool)
 
+        self.clustering = AgglomerativeClustering(n_clusters=coarse_grain_dims[-1])
+
     def forward(self, x, edge_index):
         outputs = []
         batch_indices = []
@@ -56,6 +61,35 @@ class HierarchicalCoarseGraining(pl.LightningModule):
             batch_indices.append(batch)
 
         return outputs, batch_indices
+
+    def coarse_grain_representation(self, x, labels):
+        unique_labels = np.unique(labels)
+        num_clusters = len(unique_labels)
+        coarse_grained_reps = []
+
+        for label in unique_labels:
+            cluster_indices = np.where(labels == label)[0]
+            cluster_x = x[cluster_indices]
+            cluster_mean = torch.mean(cluster_x, dim=0)
+            coarse_grained_reps.append(cluster_mean)
+
+        return torch.stack(coarse_grained_reps)
+
+    def hierarchical_clustering(self, x):
+        cluster_labels = np.zeros((x.shape[0], self.num_levels))
+
+        for level in range(self.num_levels):
+            if level == 0:
+                clustering = self.clustering
+            else:
+                clustering = AgglomerativeClustering(n_clusters=self.coarse_grain_dims[level])
+
+            clustering.fit(x)
+            labels = clustering.labels_
+            cluster_labels[:, level] = labels
+            x = self.coarse_grain_representation(x, labels)
+
+        return cluster_labels
 
     def training_step(self, batch, batch_idx):
         x = batch.x
@@ -95,12 +129,6 @@ def estimate_latent_dim(data_list, variance_threshold=0.95):
     return latent_dim
 
 
-def random_translate(data, translate_range):
-    translation = torch.FloatTensor(data.pos.size()).uniform_(-translate_range, translate_range)
-    data.pos += translation
-    return data
-
-
 input_dim = 3
 variance_threshold = 0.95
 hidden_dim = 128
@@ -108,7 +136,7 @@ num_levels = 3
 coarse_grain_dims = [3, 3, 3]
 batch_size = 32
 dropout_rate = 0.5
-num_epochs = 1000
+num_epochs = 500
 learning_rate = 0.001
 num_folds = 5
 translate_range = 0.1
@@ -151,7 +179,7 @@ model.load_state_dict(torch.load('best_model.pt'))
 model.eval()
 
 # Load the new protein data
-new_data = torch.load('C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//chi_graph')
+new_data = torch.load('C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//chi_graph//chig.pdb.pt')
 
 # Apply the model to the new data
 new_data_loader = DataLoader([new_data], batch_size=1)
@@ -162,6 +190,11 @@ new_reconstructed_reps = []
 for data in new_data_loader:
     x, edge_index, batch = data.x, data.edge_index, data.batch
     outputs, batch_indices = model(x, edge_index)
+
+    # Hierarchical clustering
+    x_level = outputs[-1]
+    labels = model.hierarchical_clustering(x_level.detach().numpy())
+    cluster_labels = torch.tensor(labels, dtype=torch.long)
 
     # Coarse-grained representations
     coarse_grained_reps = []

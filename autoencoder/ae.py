@@ -2,23 +2,21 @@ import torch
 import torch.nn as nn
 import random
 import os
-from torch_geometric.nn import GraphConv, GCNConv, TopKPooling, GraphSAGE
-from torch_geometric.data import DataLoader
+from torch_geometric.nn import GCNConv, TopKPooling, GATConv
+from torch_geometric.data import DataLoader, Data
 from sklearn.decomposition import PCA
 from sklearn.cluster import AgglomerativeClustering
 import numpy as np
 import pytorch_lightning as pl
-
-#This doesnt work. At all. I'm working on making it work. Ignore it for now
 
 random_seed = 42
 random.seed(random_seed)
 torch.manual_seed(random_seed)
 
 
-class VariationalAutoencoder(pl.LightningModule):
-    def __init__(self, input_dim, latent_dim, num_layers, num_levels, coarse_grain_dims, dropout_rate=0.5):
-        super(VariationalAutoencoder, self).__init__()
+class HierarchicalCoarseGraining(pl.LightningModule):
+    def __init__(self, input_dim, latent_dim, num_levels, coarse_grain_dims, dropout_rate=0.5):
+        super(HierarchicalCoarseGraining, self).__init__()
 
         self.encoder = nn.ModuleList()
         self.decoder = nn.ModuleList()
@@ -30,9 +28,9 @@ class VariationalAutoencoder(pl.LightningModule):
             output_dim_level = coarse_grain_dims[level]
 
             if level == 0:
-                encoder = GraphSAGE(input_dim_level, latent_dim, num_layers, aggr='mean')
+                encoder = GCNConv(input_dim_level, latent_dim)
             else:
-                encoder = GraphConv(input_dim_level, latent_dim)
+                encoder = GATConv(input_dim_level, latent_dim)
 
             self.encoder.append(encoder)
 
@@ -47,61 +45,45 @@ class VariationalAutoencoder(pl.LightningModule):
 
         self.clustering = AgglomerativeClustering(n_clusters=coarse_grain_dims[-1])
 
-        self.fc_mu = nn.Linear(latent_dim, latent_dim)
-        self.fc_logvar = nn.Linear(latent_dim, latent_dim)
+    def forward(self, x, edge_index):
+        outputs = []
+        batch_indices = []
 
-    def encode(self, x, edge_index):
-        for encoder, dropout, pool in zip(self.encoder, self.dropout, self.pooling):
+        for encoder, decoder, dropout, pool in zip(self.encoder, self.decoder, self.dropout, self.pooling):
             x = dropout(x)
             x = encoder(x, edge_index)
             x, edge_index, _, batch, _, _ = pool(x, edge_index)
+            x = decoder(x, edge_index)
 
-        x = x.mean(dim=0)  # Global pooling
-        return self.fc_mu(x), self.fc_logvar(x)
+            outputs.append(x)
+            batch_indices.append(batch)
 
-    def reparameterize(self, mu, logvar):
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return eps * std + mu
-
-    def decode(self, z, edge_index):
-        for decoder in self.decoder:
-            z = decoder(z, edge_index)
-        return z
-
-    def forward(self, x, edge_index):
-        mu, logvar = self.encode(x, edge_index)
-        z = self.reparameterize(mu, logvar)
-        return self.decode(z, edge_index), mu, logvar
+        return outputs, batch_indices
 
     def training_step(self, batch, batch_idx):
         x = batch.x
         edge_index = batch.edge_index
 
-        outputs, mu, logvar = self(x, edge_index)
+        outputs, _ = self(x, edge_index)
+
         reconstruction_loss = 0.0
         for level_output in outputs:
             reconstruction_loss += self.reconstruction_loss_function(level_output, x[:level_output.size(0)])
 
-        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-        loss = reconstruction_loss + kl_loss
-
-        self.log("train_loss", loss, prog_bar=True, logger=True, batch_size=batch.x.size(0))
-        return loss
+        self.log("train_loss", reconstruction_loss, prog_bar=True, logger=True, batch_size=batch.x.size(0))
+        return reconstruction_loss
 
     def validation_step(self, batch, batch_idx):
         x = batch.x
         edge_index = batch.edge_index
 
-        outputs, mu, logvar = self(x, edge_index)
+        outputs, _ = self(x, edge_index)
+
         reconstruction_loss = 0.0
         for level_output in outputs:
             reconstruction_loss += self.reconstruction_loss_function(level_output, x[:level_output.size(0)])
 
-        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-        loss = reconstruction_loss + kl_loss
-
-        self.log("val_loss", loss, prog_bar=True, logger=True, batch_size=batch.x.size(0))
+        self.log("val_loss", reconstruction_loss, prog_bar=True, logger=True, batch_size=batch.x.size(0))
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.learning_rate)
@@ -114,15 +96,15 @@ class VariationalAutoencoder(pl.LightningModule):
         for label in unique_labels:
             cluster_indices = np.where(labels == label)[0]
             cluster_x = x[cluster_indices]
-            cluster_mean = torch.mean(cluster_x, dim=0)
+            cluster_mean = np.mean(cluster_x, axis=0)
             coarse_grained_reps.append(cluster_mean)
 
-        return torch.stack(coarse_grained_reps)
+        return torch.tensor(coarse_grained_reps)
 
-    def hierarchical_clustering(self, x, num_layers, coarse_grain_dims):
-        cluster_labels = np.zeros((x.shape[0], num_layers))
+    def hierarchical_clustering(self, x, num_levels):
+        cluster_labels = np.zeros((x.shape[0], num_levels))
 
-        for level in range(num_layers):
+        for level in range(num_levels):
             if level == 0:
                 clustering = self.clustering
             else:
@@ -154,12 +136,11 @@ def random_translate(data, translate_range):
 input_dim = 3
 variance_threshold = 0.95
 hidden_dim = 128
-num_layers = 2  # Fill in the number of layers
 num_levels = 3
 coarse_grain_dims = [3, 3, 3]
 batch_size = 32
 dropout_rate = 0.5
-num_epochs = 500
+num_epochs = 1000
 learning_rate = 0.001
 num_folds = 5
 translate_range = 0.1
@@ -185,7 +166,7 @@ for i, data in enumerate(data_list):
 train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
 val_loader = DataLoader(val_data, batch_size=batch_size)
 
-model = VariationalAutoencoder(input_dim, latent_dim, num_layers, num_levels, coarse_grain_dims, dropout_rate)
+model = HierarchicalCoarseGraining(input_dim, latent_dim, num_levels, coarse_grain_dims, dropout_rate)
 
 model.reconstruction_loss_function = nn.MSELoss()
 model.learning_rate = learning_rate
@@ -197,7 +178,7 @@ trainer.fit(model, train_loader, val_loader)
 torch.save(model.state_dict(), 'best_model.pt')
 
 # Load the trained model
-model = VariationalAutoencoder(input_dim, latent_dim, num_layers, num_levels, coarse_grain_dims, dropout_rate)
+model = HierarchicalCoarseGraining(input_dim, latent_dim, num_levels, coarse_grain_dims, dropout_rate)
 model.load_state_dict(torch.load('best_model.pt'))
 model.eval()
 
@@ -212,11 +193,11 @@ new_reconstructed_reps = []
 
 for data in new_data_loader:
     x, edge_index, batch = data.x, data.edge_index, data.batch
-    outputs, mu, logvar = model(x, edge_index)
+    outputs, _ = model(x, edge_index)
 
     # Coarse-grained representations at different levels
     x_level = model.encoder[0](outputs[0], edge_index)
-    labels = model.hierarchical_clustering(x_level, num_layers, coarse_grain_dims)
+    labels = model.hierarchical_clustering(x_level, num_levels)
     coarse_grained_reps = []
     for level in range(num_levels):
         level_labels = labels[:, level]
