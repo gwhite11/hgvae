@@ -6,20 +6,14 @@ from torch_geometric.nn import GCNConv, TopKPooling, GATConv, global_mean_pool
 from torch_geometric.data import DataLoader, Data
 from sklearn.decomposition import PCA
 import numpy as np
+import pytorch_lightning as pl
 
 random_seed = 42
 random.seed(random_seed)
 torch.manual_seed(random_seed)
 
-def estimate_latent_dim(data_list, variance_threshold=0.95):
-    node_features = torch.cat([data.x for data in data_list], dim=0).detach().numpy()
-    pca = PCA()
-    pca.fit(node_features)
-    cumulative_explained_variance = np.cumsum(pca.explained_variance_ratio_)
-    latent_dim = np.argmax(cumulative_explained_variance > variance_threshold)
-    return latent_dim
 
-class HierarchicalCoarseGraining(nn.Module):
+class HierarchicalCoarseGraining(pl.LightningModule):
     def __init__(self, input_dim, latent_dim, num_levels, coarse_grain_dims, dropout_rate=0.5):
         super(HierarchicalCoarseGraining, self).__init__()
 
@@ -63,6 +57,43 @@ class HierarchicalCoarseGraining(nn.Module):
 
         return outputs, batch_indices
 
+    def training_step(self, batch, batch_idx):
+        x = batch.x
+        edge_index = batch.edge_index
+
+        outputs, _ = self(x, edge_index)
+
+        reconstruction_loss = 0.0
+        for level_output in outputs:
+            reconstruction_loss += self.reconstruction_loss_function(level_output, x[:level_output.size(0)])
+
+        self.log("train_loss", reconstruction_loss, prog_bar=True, logger=True, batch_size=batch.x.size(0))
+        return reconstruction_loss
+
+    def validation_step(self, batch, batch_idx):
+        x = batch.x
+        edge_index = batch.edge_index
+
+        outputs, _ = self(x, edge_index)
+
+        reconstruction_loss = 0.0
+        for level_output in outputs:
+            reconstruction_loss += self.reconstruction_loss_function(level_output, x[:level_output.size(0)])
+
+        self.log("val_loss", reconstruction_loss, prog_bar=True, logger=True, batch_size=batch.x.size(0))
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=self.learning_rate)
+
+
+def estimate_latent_dim(data_list, variance_threshold=0.95):
+    node_features = torch.cat([data.x for data in data_list], dim=0).detach().numpy()
+    pca = PCA()
+    pca.fit(node_features)
+    cumulative_explained_variance = np.cumsum(pca.explained_variance_ratio_)
+    latent_dim = np.argmax(cumulative_explained_variance > variance_threshold)
+    return latent_dim
+
 
 def random_translate(data, translate_range):
     translation = torch.FloatTensor(data.pos.size()).uniform_(-translate_range, translate_range)
@@ -105,56 +136,11 @@ val_loader = DataLoader(val_data, batch_size=batch_size)
 
 model = HierarchicalCoarseGraining(input_dim, latent_dim, num_levels, coarse_grain_dims, dropout_rate)
 
-reconstruction_loss_function = nn.MSELoss()
+model.reconstruction_loss_function = nn.MSELoss()
+model.learning_rate = learning_rate
 
-optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-sample_data = data_list[0]
-print(f"x shape: {sample_data.x.shape}")
-print(f"edge_index shape: {sample_data.edge_index.shape}")
-
-for epoch in range(num_epochs):
-    model.train()
-    total_loss = 0.0
-
-    for batch in train_loader:
-        x = batch.x
-        edge_index = batch.edge_index
-
-        outputs, _ = model(x, edge_index)
-
-        reconstruction_loss = 0.0
-        for level_output in outputs:
-            reconstruction_loss += reconstruction_loss_function(level_output, x[:level_output.size(0)])
-
-        optimizer.zero_grad()
-        reconstruction_loss.backward()
-        optimizer.step()
-
-        total_loss += reconstruction_loss.item() * x.size(0)
-
-    average_loss = total_loss / len(train_loader.dataset)
-    print(f"Epoch: {epoch + 1}/{num_epochs}, Average Loss: {average_loss}")
-
-    model.eval()
-    with torch.no_grad():
-        total_val_loss = 0.0
-        for batch in val_loader:
-            x = batch.x
-            edge_index = batch.edge_index
-
-            outputs, _ = model(x, edge_index)
-
-            val_loss = 0.0
-            for level_output in outputs:
-                val_loss += reconstruction_loss_function(level_output, x[:level_output.size(0)])
-
-            total_val_loss += val_loss.item() * x.size(0)
-
-        avg_val_loss = total_val_loss / len(val_loader.dataset)
-
-    print(f"Validation Loss: {avg_val_loss}")
-
-dataloader = DataLoader(data_list, batch_size=batch_size)
+trainer = pl.Trainer(max_epochs=num_epochs)
+trainer.fit(model, train_loader, val_loader)
 
 # Save the trained model
 torch.save(model.state_dict(), 'best_model.pt')
