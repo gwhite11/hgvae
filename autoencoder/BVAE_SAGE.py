@@ -2,17 +2,23 @@ import torch
 import torch.nn as nn
 import random
 import os
-from torch_geometric.nn import GCNConv, TopKPooling, GATConv, global_mean_pool
+from torch_geometric.nn import GraphConv, TopKPooling, SAGEConv
 from torch_geometric.data import DataLoader, Data
 from sklearn.decomposition import PCA
 import numpy as np
 import pytorch_lightning as pl
+from scipy.cluster.hierarchy import dendrogram, linkage
+import matplotlib.pyplot as plt
 
 random_seed = 42
 random.seed(random_seed)
 torch.manual_seed(random_seed)
 torch.cuda.manual_seed_all(random_seed)
 
+# I have added a beta term but it is currently set to one - I figured it was something else that could
+# be tuned to improve performance. I also changed the layers to SAGE because I thought these might be better
+# I could be wrong about that but it is worth trying I suppose.
+# I also added a bit to try to make a dendrogram with the scipy :)
 
 class HierarchicalCoarseGraining(pl.LightningModule):
     def __init__(self, input_dim, latent_dim, num_levels, coarse_grain_dims, dropout_rate=0.5):
@@ -22,6 +28,7 @@ class HierarchicalCoarseGraining(pl.LightningModule):
         self.decoders = nn.ModuleList()
         self.pooling = nn.ModuleList()
         self.dropout = nn.ModuleList()
+        self.norm = nn.ModuleList()  # Added normalization list
 
         # new addition for B-VAE
         self.fc_mu = nn.Linear(latent_dim, latent_dim)
@@ -32,13 +39,13 @@ class HierarchicalCoarseGraining(pl.LightningModule):
             output_dim_level = coarse_grain_dims[level]
 
             if level == 0:
-                encoder = GCNConv(input_dim_level, latent_dim)
+                encoder = GraphConv(input_dim_level, latent_dim)
             else:
-                encoder = GATConv(input_dim_level, latent_dim)
+                encoder = SAGEConv(input_dim_level, latent_dim, normalize=False)
 
             self.encoders.append(encoder)
 
-            decoder = GCNConv(latent_dim, output_dim_level)
+            decoder = GraphConv(latent_dim, output_dim_level)
             self.decoders.append(decoder)
 
             dropout = nn.Dropout(p=dropout_rate)
@@ -47,23 +54,23 @@ class HierarchicalCoarseGraining(pl.LightningModule):
             pool = TopKPooling(latent_dim)
             self.pooling.append(pool)
 
-    def reparameterize(self, mu, logvar):
-        std = torch.exp(logvar / 2)
-        eps = torch.randn_like(std)
-        return mu + eps * std
+            norm = nn.LayerNorm(latent_dim)  # Added normalization layer
+            self.norm.append(norm)
 
     def forward(self, x, edge_index):
         outputs = []
         batch_indices = []
 
-        for encoder, decoder, dropout, pool in zip(self.encoders, self.decoders, self.dropout, self.pooling):
+        for encoder, decoder, dropout, pool, norm in zip(self.encoders, self.decoders, self.dropout, self.pooling, self.norm):  # Added norm
             x = dropout(x)
             z = encoder(x, edge_index)
+            z = norm(z)  # Added normalization to the encoder output
             mu = self.fc_mu(z)
             log_var = self.fc_var(z)
             z = self.reparameterize(mu, log_var)
             x, edge_index, _, batch, _, _ = pool(z, edge_index)
             x = decoder(x, edge_index)
+            x = norm(x)  # Added normalization to the decoder output
 
             outputs.append(x)
             batch_indices.append(batch)
@@ -97,6 +104,7 @@ class HierarchicalCoarseGraining(pl.LightningModule):
         loss = self.loss_function(outputs, x, mu, log_var)
 
         self.log("val_loss", loss, prog_bar=True, logger=True, batch_size=batch.x.size(0))
+
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.learning_rate)
 
@@ -156,7 +164,6 @@ val_loader = DataLoader(val_data, batch_size=batch_size)
 model = HierarchicalCoarseGraining(input_dim, latent_dim, num_levels, coarse_grain_dims, dropout_rate)
 model.learning_rate = learning_rate
 
-
 trainer = pl.Trainer(max_epochs=num_epochs)
 trainer.fit(model, train_loader, val_loader)
 
@@ -197,3 +204,12 @@ torch.save(new_coarse_grained_reps, 'new_protein_coarse_grained_reps.pt')
 
 # Save the reconstructed representations
 torch.save(new_reconstructed_reps, 'new_protein_reconstructed_reps.pt')
+
+# Generate dendrogram
+for level in range(num_levels):
+    level_output = torch.cat([level_data[level].x for level_data in new_coarse_grained_reps], dim=0)
+    Z = linkage(level_output.detach().numpy(), method='ward')
+    dendrogram(Z)
+
+# Show the dendrogram
+plt.show()
