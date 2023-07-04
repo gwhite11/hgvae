@@ -13,6 +13,9 @@ random_seed = 42
 random.seed(random_seed)
 torch.manual_seed(random_seed)
 
+# Here I was trying to use the sklearn clustering inside the latent space
+# I found some incompatibility issues with CUDA pytorch and numpy - the error told me to rebuild pytotch
+# from source but I don't think I can quite manage that.
 
 class HierarchicalCoarseGraining(pl.LightningModule):
     def __init__(self, input_dim, latent_dim, num_levels, coarse_grain_dims, dropout_rate=0.5):

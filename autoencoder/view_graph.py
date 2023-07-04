@@ -20,7 +20,7 @@ def visualize(data):
 
 
 # Load your graph
-data = torch.load('C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//graph_data//1yu5_1.pdb.pt')
+data = torch.load('C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//new_protein_coarse_grained_reps.pt')
 
 # Visualize it
 visualize(data)

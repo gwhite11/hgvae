@@ -3,13 +3,12 @@ import torch.nn as nn
 import random
 import os
 from torch_geometric.nn import GraphConv, GCNConv, TopKPooling, GraphSAGE
-from torch_geometric.data import DataLoader
+from torch_geometric.data import DataLoader, Data
 from sklearn.decomposition import PCA
 from sklearn.cluster import AgglomerativeClustering
 import numpy as np
 import pytorch_lightning as pl
 
-#This doesnt work. At all. I'm working on making it work. Ignore it for now
 
 random_seed = 42
 random.seed(random_seed)
@@ -50,8 +49,8 @@ class VariationalAutoencoder(pl.LightningModule):
         self.fc_mu = nn.Linear(latent_dim, latent_dim)
         self.fc_logvar = nn.Linear(latent_dim, latent_dim)
 
-    def encode(self, x, edge_index):
-        for encoder, dropout, pool in zip(self.encoder, self.dropout, self.pooling):
+    def encode(self, xs, edge_indices):
+        for encoder, dropout, pool, x, edge_index in zip(self.encoder, self.dropout, self.pooling, xs, edge_indices):
             x = dropout(x)
             x = encoder(x, edge_index)
             x, edge_index, _, batch, _, _ = pool(x, edge_index)
@@ -69,10 +68,10 @@ class VariationalAutoencoder(pl.LightningModule):
             z = decoder(z, edge_index)
         return z
 
-    def forward(self, x, edge_index):
-        mu, logvar = self.encode(x, edge_index)
+    def forward(self, xs, edge_indices):
+        mu, logvar = self.encode(xs, edge_indices)
         z = self.reparameterize(mu, logvar)
-        return self.decode(z, edge_index), mu, logvar
+        return self.decode(z, edge_indices[-1]), mu, logvar
 
     def training_step(self, batch, batch_idx):
         x = batch.x
@@ -102,11 +101,12 @@ class VariationalAutoencoder(pl.LightningModule):
         loss = reconstruction_loss + kl_loss
 
         self.log("val_loss", loss, prog_bar=True, logger=True, batch_size=batch.x.size(0))
+        return loss
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.learning_rate)
 
-    def coarse_grain_representation(self, x, labels):
+    def create_coarse_graph(self, cluster_labels, original_edge_index):
         unique_labels = np.unique(labels)
         num_clusters = len(unique_labels)
         coarse_grained_reps = []
@@ -119,8 +119,24 @@ class VariationalAutoencoder(pl.LightningModule):
 
         return torch.stack(coarse_grained_reps)
 
-    def hierarchical_clustering(self, x, num_layers, coarse_grain_dims):
+    def create_coarse_graph(self, cluster_labels, original_edge_index):
+        num_clusters = cluster_labels.max() + 1
+        cluster_edges = set()
+
+        for i, j in original_edge_index.t().tolist():
+            cluster_i = cluster_labels[i].item()
+            cluster_j = cluster_labels[j].item()
+
+            if cluster_i != cluster_j:
+                cluster_edges.add(tuple(sorted((cluster_i, cluster_j))))
+
+        coarse_edge_index = torch.tensor(list(cluster_edges), dtype=torch.long).t().contiguous()
+
+        return coarse_edge_index
+
+    def hierarchical_clustering(self, x, edge_index, num_layers, coarse_grain_dims):
         cluster_labels = np.zeros((x.shape[0], num_layers))
+        edge_indices = []
 
         for level in range(num_layers):
             if level == 0:
@@ -131,9 +147,13 @@ class VariationalAutoencoder(pl.LightningModule):
             clustering.fit(x)
             labels = clustering.labels_
             cluster_labels[:, level] = labels
+
+            coarse_edge_index = self.create_coarse_graph(torch.tensor(labels, dtype=torch.long), edge_index)
+            edge_indices.append(coarse_edge_index)
+
             x = self.coarse_grain_representation(x, labels)
 
-        return cluster_labels
+        return cluster_labels, edge_indices
 
 
 def estimate_latent_dim(data_list, variance_threshold=0.95):
