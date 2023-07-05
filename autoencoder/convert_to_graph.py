@@ -28,6 +28,10 @@ def pdb_to_torch_geometric(pdb_file, output_directory, distance_threshold=5.0):
     x = torch.tensor(np.array(coordinates), dtype=torch.float)  # Use atom coordinates as features
     edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()  # Transform to PyTorch format
 
+    # Ensure edge_index is two-dimensional
+    if edge_index.dim() == 1:
+        edge_index = edge_index.unsqueeze(0)
+
     data = Data(x=x, edge_index=edge_index)
 
     # Save the graph data
@@ -38,10 +42,10 @@ def pdb_to_torch_geometric(pdb_file, output_directory, distance_threshold=5.0):
 
 
 # Specify the path to your directory with pdb files
-pdb_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files///chig'
+pdb_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//pdb_files_1'
 
 # Specify the path to your output directory
-output_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//chi_graph'
+output_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//graph_data_test'
 
 # Get all pdb files in the directory
 pdb_files = glob.glob(os.path.join(pdb_directory, '*.pdb'))
