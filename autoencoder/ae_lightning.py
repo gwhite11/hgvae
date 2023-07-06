@@ -5,7 +5,7 @@ import os
 from torch_geometric.nn import GCNConv, TopKPooling, GATConv
 from torch_geometric.data import DataLoader, Data
 from sklearn.decomposition import PCA
-from sklearn.cluster import AgglomerativeClustering
+from sklearn.cluster import KMeans
 import numpy as np
 import pytorch_lightning as pl
 
@@ -13,9 +13,6 @@ random_seed = 42
 random.seed(random_seed)
 torch.manual_seed(random_seed)
 
-# Here I was trying to use the sklearn clustering inside the latent space
-# I found some incompatibility issues with CUDA pytorch and numpy - the error told me to rebuild pytotch
-# from source but I don't think I can quite manage that.
 
 class HierarchicalCoarseGraining(pl.LightningModule):
     def __init__(self, input_dim, latent_dim, num_levels, coarse_grain_dims, dropout_rate=0.5):
@@ -48,7 +45,8 @@ class HierarchicalCoarseGraining(pl.LightningModule):
             pool = TopKPooling(latent_dim)
             self.pooling.append(pool)
 
-        self.clustering = AgglomerativeClustering(n_clusters=coarse_grain_dims[-1])
+        self.clustering = KMeans(n_clusters=coarse_grain_dims[-1])
+
 
     def forward(self, x, edge_index):
         outputs = []
@@ -82,13 +80,8 @@ class HierarchicalCoarseGraining(pl.LightningModule):
         cluster_labels = np.zeros((x.shape[0], self.num_levels))
 
         for level in range(self.num_levels):
-            if level == 0:
-                clustering = self.clustering
-            else:
-                clustering = AgglomerativeClustering(n_clusters=self.coarse_grain_dims[level])
-
-            clustering.fit(x)
-            labels = clustering.labels_
+            clustering = KMeans(n_clusters=self.coarse_grain_dims[level])
+            labels = clustering.fit_predict(x)
             cluster_labels[:, level] = labels
             x = self.coarse_grain_representation(x, labels)
 
@@ -144,7 +137,7 @@ learning_rate = 0.001
 num_folds = 5
 translate_range = 0.1
 
-input_files_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//graph_data'
+input_files_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//graph_data_test'
 data_list = []
 for filename in os.listdir(input_files_directory):
     if filename.endswith(".pt"):
