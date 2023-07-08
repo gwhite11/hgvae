@@ -9,6 +9,15 @@ from torch.utils.data.dataset import random_split
 from torch_geometric.data import InMemoryDataset
 
 
+def build_graph(x, distance_threshold=5.0):
+    edge_index = []
+    for i, xi in enumerate(x):
+        for j, xj in enumerate(x):
+            if i != j and torch.norm(xi - xj) < distance_threshold:
+                edge_index.append([i, j])
+    return torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+
+
 def load_data(graph_files):
     data_list = []
     for graph_file in graph_files:
@@ -21,17 +30,8 @@ def load_data(graph_files):
 
 
 # Load the data
-graph_files = glob.glob('path_to_your_graph_files/*.pt')
+graph_files = glob.glob('C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//graph_data_test/*.pt')
 data_list = load_data(graph_files)
-
-
-def build_graph(x, distance_threshold=5.0):
-    edge_index = []
-    for i, xi in enumerate(x):
-        for j, xj in enumerate(x):
-            if i != j and torch.norm(xi - xj) < distance_threshold:
-                edge_index.append([i, j])
-    return torch.tensor(edge_index, dtype=torch.long).t().contiguous()
 
 
 def estimate_latent_dim_from_graphs(graphs, var_threshold=0.9):
@@ -65,6 +65,10 @@ def estimate_latent_dim_from_graphs(graphs, var_threshold=0.9):
 
     return latent_dim.item()
 
+
+# Set hyperparameters
+num_epochs = 100
+learning_rate = 0.001
 
 # Define your dimensions
 input_dim = 3
@@ -124,11 +128,11 @@ class VAE(pl.LightningModule):
         self.log('val_loss', loss)
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=0.001)
+        return torch.optim.Adam(self.parameters(), lr=learning_rate)
 
 
 # Initialize the list of VAEs
-vae_models = [VAE(input_dim, hidden_dim, latent_dim) for _ in range(2)]
+vae_models = [VAE(input_dim, hidden_dim, latent_dim) for _ in range(3)]
 
 
 class ProteinGraphDataset(InMemoryDataset):
@@ -156,14 +160,15 @@ train_loader = DataLoader(train_data, batch_size=1, shuffle=True)
 val_loader = DataLoader(val_data, batch_size=1, shuffle=True)
 test_loader = DataLoader(test_data, batch_size=1, shuffle=True)
 
+
 # Create the trainer with the model checkpoint callback
 checkpoint_callback = ModelCheckpoint(monitor='val_loss', save_top_k=1, mode='min')
-trainer = pl.Trainer(max_epochs=100, callbacks=[checkpoint_callback])
+trainer = pl.Trainer(max_epochs=num_epochs, callbacks=[checkpoint_callback])
 
 for i, model in enumerate(vae_models):
     # Train the model
     checkpoint_callback = ModelCheckpoint(monitor='val_loss', save_top_k=1, mode='min')
-    trainer = pl.Trainer(max_epochs=100, callbacks=[checkpoint_callback])
+    trainer = pl.Trainer(max_epochs=num_epochs, callbacks=[checkpoint_callback])
     trainer.fit(model, train_loader, val_loader)
 
     # Test the model
@@ -181,15 +186,44 @@ for i, model in enumerate(vae_models):
             # Update the graph with the coarse-grained version
             data_list[j] = Data(x=coarse_grained_x, edge_index=coarse_grained_edge_index)
 
-            # Save the coarse-grained graph after each level
-            torch.save(data_list[j], f'path_to_save_your_graphs/level_{i + 1}/' + data.name)
+            # If there's another level, update the loaders for the next level
+            if i < len(vae_models) - 1:
+                dataset = ProteinGraphDataset(None, data_list)
+                train_data, val_data, test_data = random_split(dataset, [train_size, val_size, test_size])
+                train_loader = DataLoader(train_data, batch_size=1, shuffle=True)
+                val_loader = DataLoader(val_data, batch_size=1, shuffle=True)
+                test_loader = DataLoader(test_data, batch_size=1, shuffle=True)
 
-            # Generate and save reconstructed graph only for the first model
-            if i == 0:
-                # Generate reconstructed graph
-                reconstructed_x = model.decode(z, data.edge_index)
-                reconstructed_edge_index = build_graph(reconstructed_x)
+# Load the last trained model
+trained_model = vae_models[-1]
 
-                # Save the reconstructed graph
-                reconstructed_data = Data(x=reconstructed_x, edge_index=reconstructed_edge_index)
-                torch.save(reconstructed_data, f'path_to_save_your_reconstructed_graphs/level_{i + 1}/' + data.name)
+
+def predict_and_reconstruct_graph(filepath, vae_models):
+    data = torch.load(filepath)
+
+    for model in vae_models:
+        model.eval()
+        with torch.no_grad():
+            mu, logvar = model.encode(data.x, data.edge_index)
+            z = model.reparameterize(mu, logvar)
+            coarse_grained_x = mu
+            coarse_grained_edge_index = build_graph(coarse_grained_x)
+
+            # Update the graph with the coarse-grained version
+            data = Data(x=coarse_grained_x, edge_index=coarse_grained_edge_index)
+
+            # Generate reconstructed graph
+            reconstructed_x = model.decode(z, data.edge_index)
+            reconstructed_edge_index = build_graph(reconstructed_x)
+
+            # Save the reconstructed graph
+            reconstructed_data = Data(x=reconstructed_x, edge_index=reconstructed_edge_index)
+
+            yield data, reconstructed_data
+
+
+# Predict and reconstruct a graph from a new file
+filepath = "C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//chi_graph//chig.pdb.pt"
+for coarse_graph, reconstructed_graph in predict_and_reconstruct_graph(filepath, vae_models):
+    print(coarse_graph, reconstructed_graph)
+
