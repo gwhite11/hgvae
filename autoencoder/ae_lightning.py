@@ -70,22 +70,23 @@ class HierarchicalCoarseGraining(pl.LightningModule):
 
         for label in unique_labels:
             cluster_indices = np.where(labels == label)[0]
-            cluster_x = x[cluster_indices]
+            cluster_x = torch.as_tensor(x[cluster_indices]).clone().detach()
+            # Convert to tensor and then use clone().detach()
             cluster_mean = torch.mean(cluster_x, dim=0)
             coarse_grained_reps.append(cluster_mean)
 
         return torch.stack(coarse_grained_reps)
 
     def hierarchical_clustering(self, x):
-        cluster_labels = np.zeros((x.shape[0], self.num_levels))
+        cluster_labels_list = []
 
         for level in range(self.num_levels):
-            clustering = KMeans(n_clusters=self.coarse_grain_dims[level])
+            clustering = KMeans(n_clusters=self.coarse_grain_dims[level], n_init=10)
             labels = clustering.fit_predict(x)
-            cluster_labels[:, level] = labels
+            cluster_labels_list.append(labels.tolist())  # convert to list
             x = self.coarse_grain_representation(x, labels)
 
-        return cluster_labels
+        return cluster_labels_list
 
     def training_step(self, batch, batch_idx):
         x = batch.x
@@ -132,7 +133,7 @@ num_levels = 3
 coarse_grain_dims = [3, 3, 3]
 batch_size = 32
 dropout_rate = 0.5
-num_epochs = 500
+num_epochs = 10
 learning_rate = 0.001
 num_folds = 5
 translate_range = 0.1
@@ -149,14 +150,19 @@ latent_dim = estimate_latent_dim(data_list, variance_threshold)
 
 train_data = []
 val_data = []
+test_data = []
 for i, data in enumerate(data_list):
     if i % num_folds == 0:
+        test_data.append(data)
+    elif i % num_folds == 1:
         val_data.append(data)
     else:
         train_data.append(data)
 
 train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
 val_loader = DataLoader(val_data, batch_size=batch_size)
+test_loader = DataLoader(test_data, batch_size=batch_size)
+
 
 model = HierarchicalCoarseGraining(input_dim, latent_dim, num_levels, coarse_grain_dims, dropout_rate)
 
@@ -183,14 +189,31 @@ new_data_loader = DataLoader([new_data], batch_size=1)
 new_coarse_grained_reps = []
 new_reconstructed_reps = []
 
+# Apply the model to the new data
+new_data_loader = DataLoader([new_data], batch_size=1)
+
+new_coarse_grained_reps = []
+new_reconstructed_reps = []
+
 for data in new_data_loader:
     x, edge_index, batch = data.x, data.edge_index, data.batch
     outputs, batch_indices = model(x, edge_index)
 
+    # Print dimensions of outputs and provide expected shapes
+    for i, output in enumerate(outputs):
+        print(f"Output {i} shape:", output.shape)
+        if i == len(model.encoders) - 1:
+            input_dim = model.encoders[-1].out_channels  # Output dimension of the last encoder
+            expected_shape = (batch.size(0), input_dim)  # Assuming batch dimension is preserved
+        else:
+            input_dim = model.encoders[i].out_channels  # Output dimension of the current encoder
+            expected_shape = (batch.size(0), input_dim)  # Assuming batch dimension is preserved
+        print(f"Expected shape for decoder {i}:", expected_shape)
+
     # Hierarchical clustering
     x_level = outputs[-1]
     labels = model.hierarchical_clustering(x_level.detach().numpy())
-    cluster_labels = torch.tensor(labels, dtype=torch.long)
+    cluster_labels = [torch.tensor(l, dtype=torch.long) for l in labels]
 
     # Coarse-grained representations
     coarse_grained_reps = []
@@ -200,7 +223,7 @@ for data in new_data_loader:
     new_coarse_grained_reps.append(coarse_grained_reps)
 
     # Reconstructed representations
-    reconstructed_reps = model.decoders[-1](outputs[-1], edge_index)
+    reconstructed_reps = model.decoders[-1](outputs[-1], edge_index[:, :outputs[-1].size(0)]) # Fix indexing issue
     new_reconstructed_reps.append(reconstructed_reps)
 
 # Save the coarse-grained representations
