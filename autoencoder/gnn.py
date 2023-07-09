@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
 
 
-# please note this is a basic outline - it is very very incomplete - more of an idea
+# please note this is a basic outline - it is very incomplete - more of an idea
 
 class GNNModel(nn.Module):
     def __init__(self, num_node_features, num_classes):
