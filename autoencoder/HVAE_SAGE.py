@@ -10,13 +10,18 @@ from torch_geometric.data import InMemoryDataset
 from torch_geometric.nn import radius_graph
 
 
+# Function to build a radius graph based on an input feature tensor and a distance threshold
 def build_graph(x, distance_threshold=5.0):
     """
     Build a radius graph based on an input feature tensor and a distance threshold.
     Create an edge between two atoms if the distance between them is below the threshold.
-    :param x: Input feature tensor
-    :param distance_threshold: Distance threshold for edge creation
-    :return: Edge index tensor
+
+    Args:
+        x (torch.Tensor): Input feature tensor
+        distance_threshold (float): Distance threshold for edge creation
+
+    Returns:
+        torch.Tensor: Edge index tensor
     """
     # Use the radius_graph function to create the edge_index tensor.
     edge_index = radius_graph(x, r=distance_threshold, batch=None, loop=False)
@@ -24,32 +29,59 @@ def build_graph(x, distance_threshold=5.0):
     return edge_index
 
 
+# Function to standardize the feature data in the graph
+def standardize_data(data):
+    """
+    Standardize the feature data in the graph.
+
+    Args:
+        data (torch_geometric.data.Data): Input graph data
+
+    Returns:
+        torch_geometric.data.Data: Standardized graph data
+    """
+    new_data = Data(x=(data.x - data.x.mean(dim=0)) / data.x.std(dim=0), edge_index=data.edge_index)
+    return new_data
+
 def load_data(graph_files):
+    """
+    Load the graph data from files, standardize the data, and build the graph.
+
+    Args:
+        graph_files (list): List of file paths to the graph data
+
+    Returns:
+        list: List of preprocessed graph data
+    """
     data_list = []
     for graph_file in graph_files:
-        # load graph data
+        # Load graph data
         data = torch.load(graph_file)
-        # build graph
-        data.edge_index = build_graph(data.x)
-        data_list.append(data)
+        # Standardize the data
+        data = standardize_data(data)
+        # Build graph
+        new_data = Data(x=data.x, edge_index=build_graph(data.x))
+        data_list.append(new_data)
     return data_list
 
 
-# Load the data
-graph_files = glob.glob('C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//graph_data_test/*.pt')
+# Load the graph data from files
+graph_files = glob.glob(
+    'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//graph_data_test/*.pt')
 data_list = load_data(graph_files)
 
 
-def estimate_latent_dim_from_graphs(graphs, var_threshold=0.9):
+# Function to estimate the number of principal components needed to explain a certain variance threshold
+def estimate_latent_dim_from_graphs(graphs, var_threshold=0.95):
     """
-    A simple function to estimate the number of principal components needed to explain var_threshold variance.
+    Estimate the number of principal components needed to explain var_threshold variance.
 
-    Parameters:
-    graphs (list[torch_geometric.data.Data]): a list of graph data
-    var_threshold (float): minimum explained variance ratio.
+    Args:
+        graphs (list[torch_geometric.data.Data]): List of graph data
+        var_threshold (float): Minimum explained variance ratio
 
     Returns:
-    latent_dim (int): the estimated number of principal components.
+        int: Estimated number of principal components
     """
     # Concatenate all node features
     x = torch.cat([g.x for g in graphs], dim=0)
@@ -60,7 +92,7 @@ def estimate_latent_dim_from_graphs(graphs, var_threshold=0.9):
     # Compute the covariance matrix
     cov_matrix = (x.t() @ x) / (x.size(0) - 1)
 
-    # Perform SVD (Singular Value Decomposition)
+    # Perform Singular Value Decomposition (SVD)
     U, S, V = torch.svd(cov_matrix)
 
     # Compute the explained variance and find the smallest number of components
@@ -76,16 +108,17 @@ def estimate_latent_dim_from_graphs(graphs, var_threshold=0.9):
 num_epochs = 100
 learning_rate = 0.001
 
-# Define your dimensions
+# Define input and hidden dimensions
 input_dim = 3
 hidden_dim = 64
 
-# Estimate the latent dim
+# Estimate the latent dimension
 latent_dim = estimate_latent_dim_from_graphs(data_list)
 
-print('Estimated latent dimension: ', latent_dim)
+print('Estimated latent dimension:', latent_dim)
 
 
+# Define the Variational Autoencoder (VAE) model
 class VAE(pl.LightningModule):
     def __init__(self, input_dim, hidden_dim, latent_dim):
         super(VAE, self).__init__()
@@ -137,10 +170,11 @@ class VAE(pl.LightningModule):
         return torch.optim.Adam(self.parameters(), lr=learning_rate)
 
 
-# Initialize the list of VAEs
+# Initialize a list of VAE models
 vae_models = [VAE(input_dim, hidden_dim, latent_dim) for _ in range(3)]
 
 
+# Define a custom dataset class for protein graph data
 class ProteinGraphDataset(InMemoryDataset):
     def __init__(self, root, data_list, transform=None, pre_transform=None):
         super(ProteinGraphDataset, self).__init__(root, transform, pre_transform)
@@ -150,22 +184,23 @@ class ProteinGraphDataset(InMemoryDataset):
         return self.data.__getitem__(idx)
 
 
-# Create the InMemoryDataset from the list
+# Create an InMemoryDataset from the list of graph data
 dataset = ProteinGraphDataset(None, data_list)
 
-# Define the split sizes for train, validation and test
+# Define the split sizes for train, validation, and test sets
 train_size = int(0.7 * len(dataset))
 val_size = int(0.15 * len(dataset))
 test_size = len(dataset) - train_size - val_size
 
-# Split the data
+# Split the data into train, validation, and test sets
 train_data, val_data, test_data = random_split(dataset, [train_size, val_size, test_size])
 
-# Create data loaders
-train_loader = DataLoader(train_data, batch_size=1, shuffle=True)
-val_loader = DataLoader(val_data, batch_size=1, shuffle=True)
-test_loader = DataLoader(test_data, batch_size=1, shuffle=True)
+batch_size = 16  # Choose your desired batch size
 
+# Create data loaders for train, validation, and test sets
+train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=True)
+test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=True)
 
 # Create the trainer with the model checkpoint callback
 checkpoint_callback = ModelCheckpoint(monitor='val_loss', save_top_k=1, mode='min')
@@ -173,8 +208,6 @@ trainer = pl.Trainer(max_epochs=num_epochs, callbacks=[checkpoint_callback])
 
 for i, model in enumerate(vae_models):
     # Train the model
-    checkpoint_callback = ModelCheckpoint(monitor='val_loss', save_top_k=1, mode='min')
-    trainer = pl.Trainer(max_epochs=num_epochs, callbacks=[checkpoint_callback])
     trainer.fit(model, train_loader, val_loader)
 
     # Test the model
@@ -196,18 +229,27 @@ for i, model in enumerate(vae_models):
             if i < len(vae_models) - 1:
                 dataset = ProteinGraphDataset(None, data_list)
                 train_data, val_data, test_data = random_split(dataset, [train_size, val_size, test_size])
-                train_loader = DataLoader(train_data, batch_size=1, shuffle=True)
-                val_loader = DataLoader(val_data, batch_size=1, shuffle=True)
-                test_loader = DataLoader(test_data, batch_size=1, shuffle=True)
+                train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+                val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=True)
+                test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=True)
 
 # Load the last trained model
 trained_model = vae_models[-1]
 
 
-def predict_and_reconstruct_graph(filepath, vae_models):
+# Function to predict and reconstruct a graph from a file using the trained VAE models
+def predict_and_reconstruct_graph(filepath, vae_models, output_file):
+    """
+    Predict and reconstruct a graph from a file using the trained VAE models and save the results to an output file.
+
+    Args:
+        filepath (str): File path to the graph data
+        vae_models (list): List of trained VAE models
+        output_file (str): Output file path
+    """
     data = torch.load(filepath)
 
-    for model in vae_models:
+    for i, model in enumerate(vae_models):
         model.eval()
         with torch.no_grad():
             mu, logvar = model.encode(data.x, data.edge_index)
@@ -225,11 +267,13 @@ def predict_and_reconstruct_graph(filepath, vae_models):
             # Save the reconstructed graph
             reconstructed_data = Data(x=reconstructed_x, edge_index=reconstructed_edge_index)
 
-            yield data, reconstructed_data
+            # Save the graph as a .pt file with a different name for each model
+            torch.save(reconstructed_data, f"{output_file}_model_{i}.pt")
 
 
-# Predict and reconstruct a graph from a new file
-filepath = "C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//chi_graph//chig.pdb.pt"
-for coarse_graph, reconstructed_graph in predict_and_reconstruct_graph(filepath, vae_models):
-    print(coarse_graph, reconstructed_graph)
+reconstructed_data_list = []
+for model_index in range(len(vae_models)):
+    output_file = f"path/to/output/reconstructed_graph_model_{model_index}.pt"
+    reconstructed_data = torch.load(output_file)
+    reconstructed_data_list.append(reconstructed_data)
 
