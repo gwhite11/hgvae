@@ -8,6 +8,8 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.utils.data.dataset import random_split
 from torch_geometric.data import InMemoryDataset
 from torch_geometric.nn import radius_graph
+import matplotlib.pyplot as plt
+from sklearn.decomposition import FastICA
 
 
 # Function to build a radius graph based on an input feature tensor and a distance threshold
@@ -43,25 +45,22 @@ def standardize_data(data):
     new_data = Data(x=(data.x - data.x.mean(dim=0)) / data.x.std(dim=0), edge_index=data.edge_index)
     return new_data
 
+
 def load_data(graph_files):
-    """
-    Load the graph data from files, standardize the data, and build the graph.
-
-    Args:
-        graph_files (list): List of file paths to the graph data
-
-    Returns:
-        list: List of preprocessed graph data
-    """
     data_list = []
     for graph_file in graph_files:
-        # Load graph data
-        data = torch.load(graph_file)
-        # Standardize the data
-        data = standardize_data(data)
-        # Build graph
-        new_data = Data(x=data.x, edge_index=build_graph(data.x))
-        data_list.append(new_data)
+        try:
+            # Load graph data
+            data = torch.load(graph_file)
+            # Standardize the data
+            data = standardize_data(data)
+            # Build graph
+            new_data = Data(x=data.x, edge_index=build_graph(data.x))
+            data_list.append(new_data)
+        except KeyError as e: # adding this to try and get rid of these key errors
+            print(f"Skipping graph file: {graph_file} - KeyError occurred")
+            continue
+    print([idx for idx, _ in enumerate(data_list)])  # Print indices
     return data_list
 
 
@@ -74,14 +73,14 @@ data_list = load_data(graph_files)
 # Function to estimate the number of principal components needed to explain a certain variance threshold
 def estimate_latent_dim_from_graphs(graphs, var_threshold=0.95):
     """
-    Estimate the number of principal components needed to explain var_threshold variance.
+    Estimate the number of independent components needed to explain var_threshold variance using scree plot analysis.
 
     Args:
         graphs (list[torch_geometric.data.Data]): List of graph data
         var_threshold (float): Minimum explained variance ratio
 
     Returns:
-        int: Estimated number of principal components
+        int: Estimated number of independent components
     """
     # Concatenate all node features
     x = torch.cat([g.x for g in graphs], dim=0)
@@ -89,19 +88,35 @@ def estimate_latent_dim_from_graphs(graphs, var_threshold=0.95):
     # Center the data
     x = x - x.mean(dim=0)
 
+    # Perform ICA with a maximum number of components equal to the number of non-spatial features
+    n_components = min(3, x.shape[1])  # Set the maximum number of components to 3
+    ica = FastICA(n_components=n_components)
+    components = ica.fit_transform(x)
+
     # Compute the covariance matrix
-    cov_matrix = (x.t() @ x) / (x.size(0) - 1)
+    cov_matrix = torch.from_numpy(components.T @ components) / (components.shape[0] - 1)
 
-    # Perform Singular Value Decomposition (SVD)
-    U, S, V = torch.svd(cov_matrix)
+    # Compute eigenvalues of the covariance matrix
+    eigenvalues, _ = torch.linalg.eigh(cov_matrix)
+    explained_variance = eigenvalues / eigenvalues.sum()
 
-    # Compute the explained variance and find the smallest number of components
-    # needed to explain at least var_threshold total variance.
-    explained_variance = S / S.sum()
-    cumulative_explained_variance = torch.cumsum(explained_variance, dim=0)
+    # Plot scree plot
+    plt.plot(range(1, n_components + 1), explained_variance, 'bo-')
+    plt.xlabel('Number of Components')
+    plt.ylabel('Explained Variance')
+    plt.title('Scree Plot')
+    plt.show()
+
+    # Find the smallest number of components needed to explain at least var_threshold total variance.
+    cumulative_explained_variance = explained_variance.cumsum(dim=0)
     latent_dim = torch.searchsorted(cumulative_explained_variance, var_threshold, right=True) + 1
 
     return latent_dim.item()
+
+
+# Call the function with your graph data
+latent_dim = estimate_latent_dim_from_graphs(data_list)
+print("Estimated Latent Dimension:", latent_dim)
 
 
 # Set hyperparameters
@@ -111,11 +126,6 @@ learning_rate = 0.001
 # Define input and hidden dimensions
 input_dim = 3
 hidden_dim = 64
-
-# Estimate the latent dimension
-latent_dim = estimate_latent_dim_from_graphs(data_list)
-
-print('Estimated latent dimension:', latent_dim)
 
 
 # Define the Variational Autoencoder (VAE) model
@@ -181,16 +191,37 @@ class ProteinGraphDataset(InMemoryDataset):
         self.data, self.slices = self.collate(data_list)
 
     def get(self, idx):
-        return self.data.__getitem__(idx)
+        if idx < len(self.data):
+            return self.data.__getitem__(idx)
+        else:
+            return None
+
+    def __getitem__(self, idx):
+        try:
+            return super(ProteinGraphDataset, self).__getitem__(idx)
+        except KeyError as e:
+            print(f"KeyError occurred for index: {idx}")
+            raise e
 
 
 # Create an InMemoryDataset from the list of graph data
 dataset = ProteinGraphDataset(None, data_list)
 
-# Define the split sizes for train, validation, and test sets
-train_size = int(0.7 * len(dataset))
-val_size = int(0.15 * len(dataset))
-test_size = len(dataset) - train_size - val_size
+# Define the proportions for train, validation, and test sets
+train_ratio = 0.8  # 80% of the data for training
+val_ratio = 0.1    # 10% of the data for validation
+test_ratio = 0.1   # 10% of the data for testing
+
+# Calculate the sizes of the train, validation, and test sets
+num_data = len(dataset)
+train_size = int(train_ratio * num_data)
+val_size = int(val_ratio * num_data)
+test_size = num_data - train_size - val_size
+
+print("Total data:", num_data)
+print("Train size:", train_size)
+print("Validation size:", val_size)
+print("Test size:", test_size)
 
 # Split the data into train, validation, and test sets
 train_data, val_data, test_data = random_split(dataset, [train_size, val_size, test_size])
@@ -273,7 +304,7 @@ def predict_and_reconstruct_graph(filepath, vae_models, output_file):
 
 reconstructed_data_list = []
 for model_index in range(len(vae_models)):
-    output_file = f"path/to/output/reconstructed_graph_model_{model_index}.pt"
+    output_file = f"C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//output_graphs//reconstructed_graph_model_{model_index}.pt"
     reconstructed_data = torch.load(output_file)
     reconstructed_data_list.append(reconstructed_data)
 
