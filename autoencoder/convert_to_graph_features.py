@@ -26,13 +26,17 @@ def pdb_to_torch_geometric(pdb_file, output_directory, distance_threshold=5.0):
 
     # Create TorchGeometric data
     x = torch.tensor(np.array(coordinates), dtype=torch.float)  # Use atom coordinates as features
+
+    # Add x, y, z coordinates as node features
+    x_with_coordinates = torch.cat((x, x[:, :3]), dim=1)
+
     edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()  # Transform to PyTorch format
 
     # Ensure edge_index is two-dimensional
     if edge_index.dim() == 1:
         edge_index = edge_index.unsqueeze(0)
 
-    data = Data(x=x, edge_index=edge_index)
+    data = Data(x=x_with_coordinates, edge_index=edge_index)
 
     # Save the graph data
     output_file = os.path.join(output_directory, os.path.basename(pdb_file) + '.pt')
