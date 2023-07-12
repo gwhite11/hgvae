@@ -8,8 +8,6 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.utils.data.dataset import random_split
 from torch_geometric.data import InMemoryDataset
 from torch_geometric.nn import radius_graph
-import matplotlib.pyplot as plt
-from sklearn.decomposition import FastICA
 
 
 # Function to build a radius graph based on an input feature tensor and a distance threshold
@@ -70,55 +68,6 @@ graph_files = glob.glob(
 data_list = load_data(graph_files)
 
 
-# Function to estimate the number of principal components needed to explain a certain variance threshold
-def estimate_latent_dim_from_graphs(graphs, var_threshold=0.95):
-    """
-    Estimate the number of independent components needed to explain var_threshold variance using scree plot analysis.
-
-    Args:
-        graphs (list[torch_geometric.data.Data]): List of graph data
-        var_threshold (float): Minimum explained variance ratio
-
-    Returns:
-        int: Estimated number of independent components
-    """
-    # Concatenate all node features
-    x = torch.cat([g.x for g in graphs], dim=0)
-
-    # Center the data
-    x = x - x.mean(dim=0)
-
-    # Perform ICA with a maximum number of components equal to the number of non-spatial features
-    n_components = min(3, x.shape[1])  # Set the maximum number of components to 3
-    ica = FastICA(n_components=n_components)
-    components = ica.fit_transform(x)
-
-    # Compute the covariance matrix
-    cov_matrix = torch.from_numpy(components.T @ components) / (components.shape[0] - 1)
-
-    # Compute eigenvalues of the covariance matrix
-    eigenvalues, _ = torch.linalg.eigh(cov_matrix)
-    explained_variance = eigenvalues / eigenvalues.sum()
-
-    # Plot scree plot
-    plt.plot(range(1, n_components + 1), explained_variance, 'bo-')
-    plt.xlabel('Number of Components')
-    plt.ylabel('Explained Variance')
-    plt.title('Scree Plot')
-    plt.show()
-
-    # Find the smallest number of components needed to explain at least var_threshold total variance.
-    cumulative_explained_variance = explained_variance.cumsum(dim=0)
-    latent_dim = torch.searchsorted(cumulative_explained_variance, var_threshold, right=True) + 1
-
-    return latent_dim.item()
-
-
-# Call the function with your graph data
-latent_dim = estimate_latent_dim_from_graphs(data_list)
-print("Estimated Latent Dimension:", latent_dim)
-
-
 # Set hyperparameters
 num_epochs = 100
 learning_rate = 0.001
@@ -126,7 +75,7 @@ learning_rate = 0.001
 # Define input and hidden dimensions
 input_dim = 3
 hidden_dim = 64
-
+latent_dim = 23
 
 # Define the Variational Autoencoder (VAE) model
 class VAE(pl.LightningModule):
