@@ -19,5 +19,5 @@ def check_graph_data(data):
     print(adj_matrix)
 
 
-data = torch.load('C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//graph_data_test_3//1a3w_1.pdb.pt')
+data = torch.load('C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//graphs//6V1V_2.pdb.pt.')
 check_graph_data(data)

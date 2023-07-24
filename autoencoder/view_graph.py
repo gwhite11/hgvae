@@ -28,7 +28,7 @@ def visualize(data):
     plt.show()
 
 # Define the file path
-file_path = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//graph_data_test//1X7B_2.pdb.pt'
+file_path = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//graphs//2O36_2.pdb.pt'
 
 # Check if the file exists
 if os.path.exists(file_path):
