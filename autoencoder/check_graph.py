@@ -5,6 +5,10 @@ def check_graph_data(data):
     # Check the shape of node features
     print("Node Features (x) Shape:", data.x.shape)
 
+    # Print the features of the first 5 nodes
+    print("Features of the first 5 nodes:")
+    print(data.x[:5])
+
     # Check the shape of edge connections
     print("Edge Connections (edge_index) Shape:", data.edge_index.shape)
 
@@ -19,5 +23,6 @@ def check_graph_data(data):
     print(adj_matrix)
 
 
-data = torch.load('C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//graphs//6V1V_2.pdb.pt.')
+
+data = torch.load('C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//graphs//1a3w_1.pdb.pt.')
 check_graph_data(data)
