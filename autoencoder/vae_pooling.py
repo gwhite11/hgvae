@@ -10,6 +10,8 @@ from sklearn.metrics import silhouette_score
 import networkx as nx
 import matplotlib.pyplot as plt
 from torch_geometric.utils import to_networkx
+from Bio.PDB import PDBIO, Chain, Residue, Atom, Model, Structure
+import numpy as np
 
 
 class VAE(torch.nn.Module):
@@ -175,21 +177,21 @@ if __name__ == '__main__':
 
     # Define the model
     in_channels = train_dataset[0].num_node_features
-    hidden_channels = 64
-    out_channels = 32
+    hidden_channels = 128
+    out_channels = 64
     model = VAE(in_channels, hidden_channels, out_channels)
 
     # Set up the optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
-    # Training loop
-    for epoch in range(100):  # Change this to the number of epochs you want
-        loss = train_vae(model, train_loader, optimizer)
-        if epoch % 10 == 0:
-            print(f"Epoch: {epoch}, Loss: {loss}")
-
-    # Save the model parameters
-    torch.save(model.state_dict(), 'model_3.pth')
+    # # Training loop
+    # for epoch in range(50):  # Change this to the number of epochs you want
+    #     loss = train_vae(model, train_loader, optimizer)
+    #     if epoch % 10 == 0:
+    #         print(f"Epoch: {epoch}, Loss: {loss}")
+    #
+    # # Save the model parameters
+    # torch.save(model.state_dict(), 'model_3.pth')
 
     # Define the model
     model = VAE(in_channels, hidden_channels, out_channels)
@@ -234,8 +236,24 @@ if __name__ == '__main__':
 
     print(labels)
 
+    from Bio.PDB import PDBParser
 
-    def visualize_clusters(data, labels):
+
+    def visualize_clusters(data, labels, original_pdb_path):
+        # Parse the original PDB file
+        parser = PDBParser()
+        structure = parser.get_structure("original", original_pdb_path)
+
+        # Extract the coordinates and identities of each atom
+        atom_info = {}
+        for model in structure:
+            for chain in model:
+                for residue in chain:
+                    for atom in residue:
+                        atom_info[atom.serial_number] = {'coord': atom.coord.tolist(),
+                                                         'residue_name': residue.resname,
+                                                         'atom_name': atom.name}
+
         # Convert the PyTorch Geometric graph data to a NetworkX graph
         G = to_networkx(data)
 
@@ -250,7 +268,45 @@ if __name__ == '__main__':
         nx.draw(G, node_color=cmap, with_labels=True, cmap=plt.cm.tab10)
         plt.show()
 
-    visualize_clusters(new_graph_data, labels)
+        # Save the coarse grained graph to a PDB file
+        coarse_grained_graph = Structure.Structure("H")
+        model = Model.Model(0)  # add a model with model_id = 0
+        chain = Chain.Chain("A")
+        model.add(chain)
+        coarse_grained_graph.add(model)
+
+        # Create clusters of atoms (or 'beads')
+        clusters = {}
+        for node, label in enumerate(labels):
+            if label in clusters:
+                clusters[label].append(node)
+            else:
+                clusters[label] = [node]
+
+        # Assign atom coordinates in each cluster by their centroid
+        for label, nodes in clusters.items():
+            # Use the coordinates from the original PDB file
+            try:
+                centroid = np.mean([atom_info[node + 1]['coord'] for node in nodes], axis=0)
+            except KeyError as e:
+                print(f'KeyError: {e} not found in atom_info')
+
+            # Use the first atom's name and residue name as the name for the cluster
+            print(nodes)
+            print(atom_info.keys())
+            first_atom_info = atom_info[nodes[0] + 1]
+            residue = Residue.Residue((" ", label, " "), first_atom_info['residue_name'], " ")
+            atom = Atom.Atom(first_atom_info['atom_name'], centroid.tolist(), 0, 0, " ",
+                             first_atom_info['atom_name'], label, "C")
+            residue.add(atom)
+            chain.add(residue)
+
+        io = PDBIO()
+        io.set_structure(coarse_grained_graph)
+        io.save("coarse_grained_graph.pdb")
+
+
+    visualize_clusters(new_graph_data, labels, "C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//input_chig//chig.pdb")
 
     # Convert the PyTorch Geometric graph data to a NetworkX graph
     G = to_networkx(new_graph_data)
