@@ -128,7 +128,7 @@ if __name__ == '__main__':
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
     # Training loop
-    for epoch in range(500):  # Change this to the number of epochs you want
+    for epoch in range(20):  # Change this to the number of epochs you want
         loss = train(model, train_loader, optimizer)
         if epoch % 10 == 0:
             print(f"Epoch: {epoch}, Loss: {loss}")

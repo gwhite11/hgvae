@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from torch_geometric.utils import to_networkx
 from Bio.PDB import PDBIO, Chain, Residue, Atom, Model, Structure
 import numpy as np
+from Bio.PDB import PDBParser
 
 
 class VAE(torch.nn.Module):
@@ -162,36 +163,23 @@ if __name__ == '__main__':
     valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, drop_last=True, num_workers=0,
                               collate_fn=collate_fn)
 
-    print(f"Total number of graphs: {len(dataset)}")
-    print(f"Number of training graphs: {len(train_dataset)}")
-    print(f"Number of validation graphs: {len(valid_dataset)}")
-
-    # Check the data
-    print("First training graph: ", train_dataset[0])
-    print("Node features of the first training graph: ", train_dataset[0].x)
-    print("Node features of the first training graph (first 5 nodes): ", train_dataset[0].x[:5])
-
-    # Print first batch from training and validation data
-    print("First batch of training graphs: ", next(iter(train_loader)))
-    print("First batch of validation graphs: ", next(iter(valid_loader)))
-
     # Define the model
     in_channels = train_dataset[0].num_node_features
     hidden_channels = 128
-    out_channels = 64
+    out_channels = 28
     model = VAE(in_channels, hidden_channels, out_channels)
 
     # Set up the optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
-    # # Training loop
-    # for epoch in range(50):  # Change this to the number of epochs you want
-    #     loss = train_vae(model, train_loader, optimizer)
-    #     if epoch % 10 == 0:
-    #         print(f"Epoch: {epoch}, Loss: {loss}")
-    #
-    # # Save the model parameters
-    # torch.save(model.state_dict(), 'model_3.pth')
+    # Training loop
+    for epoch in range(50):  # Change this to the number of epochs you want
+        loss = train_vae(model, train_loader, optimizer)
+        if epoch % 10 == 0:
+            print(f"Epoch: {epoch}, Loss: {loss}")
+
+    # Save the model parameters
+    torch.save(model.state_dict(), 'model_3.pth')
 
     # Define the model
     model = VAE(in_channels, hidden_channels, out_channels)
@@ -235,8 +223,6 @@ if __name__ == '__main__':
     labels = spectral.fit_predict(new_embeddings)
 
     print(labels)
-
-    from Bio.PDB import PDBParser
 
 
     def visualize_clusters(data, labels, original_pdb_path):
@@ -339,4 +325,65 @@ if __name__ == '__main__':
     visualize_original_and_reconstructed(new_graph_data, reconstructed_graph_data)
 
 
+    def visualize_clusters(data, labels, original_pdb_path):
+        from Bio.PDB import PDBParser
+
+        # Parse the original PDB file
+        parser = PDBParser()
+        structure = parser.get_structure("original", original_pdb_path)
+
+        # Extract the coordinates and identities of each atom
+        atom_info = {}
+        for model in structure:
+            for chain in model:
+                for residue in chain:
+                    for atom in residue:
+                        atom_info[atom.serial_number] = {'coord': atom.coord.tolist(),
+                                                         'residue_name': residue.resname,
+                                                         'atom_name': atom.name}
+
+        # Create a color map from cluster labels
+        cmap = [labels[node] for node in data.x]
+
+        plt.figure(figsize=(8, 8))
+        nx.draw(to_networkx(data), node_color=cmap, with_labels=True, cmap=plt.cm.tab10)
+        plt.show()
+
+        # Save the coarse grained graph to a PDB file
+        coarse_grained_graph = Structure.Structure("H")
+        model = Model.Model(0)  # add a model with model_id = 0
+        chain = Chain.Chain("A")
+        model.add(chain)
+        coarse_grained_graph.add(model)
+
+        # Create clusters of atoms (or 'beads')
+        clusters = {}
+        for node, label in enumerate(labels):
+            if label in clusters:
+                clusters[label].append(node)
+            else:
+                clusters[label] = [node]
+
+        # Assign atom coordinates in each cluster by their centroid
+        for label, nodes in clusters.items():
+            # Use the coordinates from the original PDB file
+            try:
+                centroid = np.mean([atom_info[node + 1]['coord'] for node in nodes], axis=0)
+            except KeyError as e:
+                print(f'KeyError: {e} not found in atom_info')
+
+            # Use the first atom's name and residue name as the name for the cluster
+            first_atom_info = atom_info[nodes[0] + 1]
+            residue = Residue.Residue((" ", label, " "), first_atom_info['residue_name'], " ")
+            atom = Atom.Atom(first_atom_info['atom_name'], centroid.tolist(), 0, 0, " ",
+                             first_atom_info['atom_name'], label, "C")
+            residue.add(atom)
+            chain.add(residue)
+
+        io = PDBIO()
+        io.set_structure(coarse_grained_graph)
+        io.save("coarse_grained_graph.pdb")
+
+    # Invoke the function with appropriate arguments at the end
+    visualize_clusters(new_graph_data, labels, 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//input_chig//chig.pdb')
 
