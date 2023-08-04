@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from torch_geometric.utils import to_networkx
 from Bio.PDB import PDBIO, Chain, Residue, Atom, Model, Structure
 import numpy as np
+from torch_geometric.utils import add_self_loops
 
 
 def contrastive_loss(z, pos_mask, neg_mask):
@@ -66,22 +67,27 @@ class GraphUNetWithSAGE(torch.nn.Module):
 
         xs = []
         edge_indices = []
+        batch_indices = []
         for i in range(self.depth):
             xs.append(x)
             edge_indices.append(edge_index)
+            batch_indices.append(batch)
+            print(f"i: {i}, x.shape: {x.shape}, edge_index.shape: {edge_index.shape}")
 
             x = self.down_convs[i](x, edge_index)
             x, edge_index, _, batch, _, _ = self.pools[i](x, edge_index, None, batch)
 
         for i in range(self.depth - 2, -1, -1):
-            edge_index = edge_indices[i]
+            print(f"i: {i}, x.shape: {x.shape}")
+
+            # Generate new edge_index
+            row, col = torch.combinations(torch.arange(x.size(0), device=x.device), 2).t()
+            edge_index = torch.stack([row, col], dim=0)
+            edge_index, _ = add_self_loops(edge_index, num_nodes=x.size(0))
+
+            print(f"edge_index.shape: {edge_index.shape}")
+
             x = self.up_convs[i]((x, xs[i]), edge_index)
-
-        x = self.jump(xs + [x])
-        x = F.relu(self.lin1(x))
-        x = F.dropout(x, p=0.5, training=self.training)
-
-        return self.lin2(x)
 
 
 class CustomGraphDataset(Dataset):
@@ -117,14 +123,14 @@ if __name__ == '__main__':
     valid_size = len(dataset) - train_size
     train_dataset, valid_dataset = random_split(dataset, [train_size, valid_size])
 
-    batch_size = 6
+    batch_size = 2
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=False, num_workers=0,
                               collate_fn=collate_fn)
     valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, drop_last=False, num_workers=0,
                               collate_fn=collate_fn)
 
     in_channels = train_dataset[0].num_node_features
-    hidden_channels = 105
+    hidden_channels = 420
     out_channels = 68
     depth = 3
     pool_ratios = [0.95, 0.85, 0.75]
@@ -134,7 +140,8 @@ if __name__ == '__main__':
     for epoch in range(50):
         model.train()
         total_loss = 0
-        for data in train_loader:
+        for i, data in enumerate(train_loader):
+            print(f"Batch {i}: num_nodes: {data.num_nodes}, edge_index.shape: {data.edge_index.shape}")
             optimizer.zero_grad()
 
             z = model(data)
