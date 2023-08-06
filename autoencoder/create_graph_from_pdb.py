@@ -36,7 +36,7 @@ def get_unique_types(pdb_files):
 
 
 # Specify the path to your directory with pdb files
-pdb_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//pdb_files_2'
+pdb_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//pdb_files_1'
 
 # Get all pdb files in the directory
 pdb_files = glob.glob(os.path.join(pdb_directory, '*.pdb'))
@@ -133,10 +133,10 @@ def pdb_to_pyg_data(pdb_file, output_directory):
 
 
 # Specify the path to your directory with pdb files
-pdb_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//input_chig'
+pdb_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//pdb_files_1'
 
 # Specify the path to your output directory
-output_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//chi_graph'
+output_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//graphs'
 
 # Get all pdb files in the directory
 pdb_files = glob.glob(os.path.join(pdb_directory, '*.pdb'))
