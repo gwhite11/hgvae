@@ -5,7 +5,6 @@ from torch.utils.data import Dataset, DataLoader, random_split
 from torch_geometric.data import Batch
 from torch_geometric.nn import SAGEConv
 from torch.nn import Linear
-from sklearn.decomposition import PCA
 from scipy.spatial.distance import cdist
 import math
 import networkx as nx
@@ -205,21 +204,22 @@ if __name__ == '__main__':
         reconstructed_graph_data = new_graph_data.clone()
         reconstructed_graph_data.x = model.decode(torch.tensor(new_embeddings))
 
-    # Perform PCA on the embeddings
-    pca = PCA(n_components=2)  # Adjust the number of components if necessary
-    pca_embeddings = pca.fit_transform(new_embeddings)
+    # Compute the mean of all embeddings
+    mean_embedding = np.mean(new_embeddings, axis=0)
 
-    # Determine the number of principal nodes
-    total_nodes = new_embeddings.shape[0]
-    division_factor = 4
-    n_principal_nodes = math.ceil(total_nodes / division_factor)
+    # Compute the distance of each node to the mean
+    distances_to_mean = np.linalg.norm(new_embeddings - mean_embedding, axis=1)
 
-    # Identify the principal nodes
-    informative_indices = np.abs(pca.components_[0]).argsort()[-n_principal_nodes:]
+    # Sort nodes by their distance to the mean
+    sorted_indices = np.argsort(distances_to_mean)
 
-    print("Principal nodes:", informative_indices)
+    # Get the top n_principal_nodes
+    n_principal_nodes = math.ceil(new_embeddings.shape[0] / 4)
+    principal_nodes_indices = sorted_indices[:n_principal_nodes]
 
-    distances = cdist(new_embeddings, new_embeddings[informative_indices])
+    print("Principal nodes:", principal_nodes_indices)
+
+    distances = cdist(new_embeddings, new_embeddings[principal_nodes_indices])
     labels = np.argmin(distances, axis=1)
 
 
@@ -292,7 +292,7 @@ if __name__ == '__main__':
 
         io = PDBIO()
         io.set_structure(coarse_grained_graph)
-        io.save("coarse_grained_graph.pdb_3")
+        io.save("coarse_grained_graph.pdb_4")
 
 
     visualize_clusters(new_graph_data, labels, original_pdb)
