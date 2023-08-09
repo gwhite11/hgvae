@@ -16,4 +16,4 @@ def remove_ter_lines(input_pdb, output_pdb):
 
 
 # Use it after generating your PDB file
-remove_ter_lines("coarse_grained_graph.pdb_7", "corrected_coarse_grained_graph.pdb")
+remove_ter_lines("new_pdb.pdb", "corrected_new_pdb.pdb")
