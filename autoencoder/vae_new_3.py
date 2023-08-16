@@ -3,7 +3,8 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, random_split
 from torch_geometric.data import Batch
-from torch_geometric.nn import SAGEConv
+from torch_geometric.data import Data
+from torch_geometric.nn import SAGEConv, TopKPooling
 from torch.nn import Linear, Dropout, BatchNorm1d
 import matplotlib.pyplot as plt
 import numpy as np
@@ -14,71 +15,141 @@ from scipy.cluster.hierarchy import dendrogram, linkage
 from collections import defaultdict
 from Bio.PDB import *
 
-class VAE(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels):
-        super(VAE, self).__init__()
-        self.dropout_prob = 0.5  # Adjust the dropout probability if needed
 
-        # Encoder layers
-        self.encoder = torch.nn.ModuleList([
+class VAE(torch.nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels, n_samples=10, pooling_ratio=0.5):
+        super(VAE, self).__init__()
+        self.dropout_prob = 0.5
+        self.n_samples = n_samples
+
+        self.pool1 = TopKPooling(hidden_channels, ratio=pooling_ratio)
+        self.pool2 = TopKPooling(2 * hidden_channels, ratio=pooling_ratio)
+
+        self.encoder1 = torch.nn.ModuleList([
             SAGEConv(in_channels, hidden_channels),
             Dropout(self.dropout_prob),
-            BatchNorm1d(hidden_channels),
+            BatchNorm1d(hidden_channels)
+        ])
+
+        self.encoder2 = torch.nn.ModuleList([
             SAGEConv(hidden_channels, 2 * hidden_channels),
             Dropout(self.dropout_prob),
             BatchNorm1d(2 * hidden_channels),
-            SAGEConv(2 * hidden_channels, 2 * out_channels)  # latent space with mean and log_std
+            SAGEConv(2 * hidden_channels, 2 * out_channels)
         ])
 
-        # Decoder layers
-        self.decoder = torch.nn.ModuleList([
-            Linear(out_channels, 2 * hidden_channels),
-            Dropout(self.dropout_prob),
-            BatchNorm1d(2 * hidden_channels),
-            Linear(2 * hidden_channels, hidden_channels),
+        self.decoder1 = torch.nn.ModuleList([
+            Linear(out_channels, hidden_channels),
             Dropout(self.dropout_prob),
             BatchNorm1d(hidden_channels),
+        ])
+
+        self.decoder2 = torch.nn.ModuleList([
             Linear(hidden_channels, in_channels)
         ])
+
         self.out_channels = out_channels
 
     def encode(self, x, edge_index):
-        x = F.relu(self.encoder[0](x, edge_index))
-        x = self.encoder[1](x)  # Dropout
-        x = self.encoder[2](x)  # BatchNorm
-        x = F.relu(self.encoder[3](x, edge_index))
-        x = self.encoder[4](x)  # Dropout
-        x = self.encoder[5](x)  # BatchNorm
-        x = self.encoder[6](x, edge_index)
-        mean, log_std = x.chunk(2, dim=-1)  # Split into mean and log_std
-        return mean, log_std
+        # First encoder layer
+        x1 = F.relu(self.encoder1[0](x, edge_index))
+        x1 = self.encoder1[1](x1)
+        x1 = self.encoder1[2](x1)
 
-    def decode(self, z):
-        h = F.relu(self.decoder[0](z))
-        h = self.decoder[1](h)  # Dropout
-        h = self.decoder[2](h)  # BatchNorm
-        h = F.relu(self.decoder[3](h))
-        h = self.decoder[4](h)  # Dropout
-        h = self.decoder[5](h)  # BatchNorm
-        return self.decoder[6](h)
+        # Pooling after first encoder layer
+        x1_pooled, edge_index_pooled, _, batch, perm1, _ = self.pool1(x1, edge_index)
 
+        # Print shapes for debugging
+        print("x1_pooled shape:", x1_pooled.shape)
+        print("perm1 shape:", perm1.shape)
+
+        # Second encoder layer
+        x2 = F.relu(self.encoder2[0](x1_pooled, edge_index_pooled))
+        x2 = self.encoder2[1](x2)
+        x2 = self.encoder2[2](x2)
+        mean, log_std = self.encoder2[3](x2, edge_index_pooled).chunk(2, dim=-1)
+
+        # Pooling after second encoder layer
+        x2_pooled, edge_index2_pooled, _, _, perm2, _ = self.pool2(x2, edge_index_pooled)
+
+        # Print shapes for debugging
+        print("x2_pooled shape:", x2_pooled.shape)
+        print("perm2 shape:", perm2.shape)
+
+        return x1, x1_pooled, x2, x2_pooled, mean, log_std, edge_index_pooled, edge_index2_pooled, perm1, perm2
+
+    def decode(self, z, x1, x2, perm1, perm2):
+        h = F.relu(self.decoder1[0](z))
+        h = self.decoder1[1](h)
+        h = self.decoder1[2](h)
+
+        # Print the size of perm2 for debugging
+        print("perm2 size:", perm2.size())
+
+        # First unpooling
+        h_unpooled_1 = self.unpool(h, perm2, x2.size(0))
+
+        # Print shapes for debugging
+        print("h_unpooled_1 shape:", h_unpooled_1.shape)
+
+        # Second unpooling and adding coarse information
+        h_unpooled_2 = self.unpool(h_unpooled_1, perm1, x1.size(0)) + x1
+
+        # Print shapes for debugging
+        print("h_unpooled_2 shape:", h_unpooled_2.shape)
+
+        return self.decoder2[0](h_unpooled_2)
+
+    def unpool(self, x_pooled, perm, num_nodes):
+        num_features = x_pooled.size(1)
+        x_unpooled = torch.zeros(num_nodes, num_features, device=x_pooled.device)
+
+        # This will ensure only valid indices in perm will be filled
+        x_unpooled[perm[:x_pooled.size(0)]] = x_pooled
+
+        print("x_unpooled shape:", x_unpooled.shape)
+
+        return x_unpooled
     def reparameterize(self, mean, log_std):
         std = log_std.exp()
-        epsilon = torch.randn_like(std)
-        z = mean + std * epsilon
+        z_samples = [mean + std * torch.randn_like(std) for _ in range(self.n_samples)]
+        z = torch.mean(torch.stack(z_samples), dim=0)
         return z
 
+    def graph_laplacian_regularization(self, z, edge_index):
+        source_nodes, target_nodes = edge_index[0], edge_index[1]
+        edge_diffs = z[source_nodes] - z[target_nodes]
+        return torch.sum(edge_diffs.pow(2))
+
     def forward(self, x, edge_index):
-        mean, log_std = self.encode(x, edge_index)
+        x1, x1_pooled, x2, x2_pooled, mean, log_std, edge_index_pooled, edge_index2_pooled, perm1, perm2 = self.encode(x, edge_index)
         z = self.reparameterize(mean, log_std)
-        return z
+        laplacian_reg = self.graph_laplacian_regularization(z, edge_index_pooled)
+        reconstruction = self.decode(z, x1, x2, perm1, perm2)
+
+        pooled_graph = Data(x=x1_pooled, edge_index=edge_index_pooled)
+        double_pooled_graph = Data(x=x2_pooled, edge_index=edge_index2_pooled)
+
+        return reconstruction, laplacian_reg, mean, log_std, pooled_graph, double_pooled_graph
+
+    def l_fp(self, pooled_graph, double_pooled_graph):
+        return F.mse_loss(pooled_graph.x, double_pooled_graph.x)
+
+    def l_similarity(self, original_graph, pooled_graph):
+        # Assuming node features are the 0-th attribute in the data
+        return F.mse_loss(pooled_graph.x, torch.mean(original_graph.x, dim=0))
+
+    def l_regularization(self, original_graph, pooled_graph):
+        # Ensuring the pooled graph is not too dissimilar from the original
+        return F.mse_loss(original_graph.x, pooled_graph.x)
 
     def global_mean_pool(self, z):
         return torch.mean(z, dim=0)
 
     def recon_loss(self, x, mean, log_std, edge_index):
+        x1, _, _, _, _, _, _, perm2 = self.encode(x, edge_index)  # Extract the necessary tensor for reconstruction
         z = self.reparameterize(mean, log_std)
-        x_recon = self.decode(z)
+        x_recon = self.decode(z, x1, perm2)  # Decode using the perm2 tensor
         recon_loss = F.mse_loss(x_recon, x, reduction='mean')
         return recon_loss
 
@@ -87,6 +158,24 @@ class VAE(torch.nn.Module):
         kl_loss = -0.5 * torch.sum(1 + 2 * log_std - mean.pow(2) - std.pow(2), dim=-1)
         return kl_loss.mean()
 
+    def compute_loss(self, data):
+        reconstruction, laplacian_reg, mean, log_std, pooled_graph, double_pooled_graph, perm1, perm2 = self(data.x,
+                                                                                                             data.edge_index)
+        x1 = self.encode(data.x, data.edge_index)[0]
+        recon_loss = self.recon_loss(data.x, mean, log_std, data.edge_index, x1)
+        kl_loss = self.kl_divergence(mean, log_std)
+        lambda_reg = adjust_lambda_reg(kl_loss)
+        loss_vae = recon_loss + kl_loss + lambda_reg * laplacian_reg
+
+        L_FP = self.l_fp(pooled_graph, double_pooled_graph)
+        L_similarity = self.l_similarity(data, pooled_graph)
+        L_regularization = self.l_regularization(data, pooled_graph)
+
+        alpha, beta, gamma = 1.0, 1.0, 1.0
+        total_loss = loss_vae + alpha * L_FP + beta * L_similarity + gamma * L_regularization
+
+        return total_loss
+
 
 def train_vae(model, loader, optimizer):
     model.train()
@@ -94,14 +183,30 @@ def train_vae(model, loader, optimizer):
     total_loss = 0
     for data in loader:
         optimizer.zero_grad()
-        mean, log_std = model.encode(data.x, data.edge_index)
-        recon_loss = model.recon_loss(data.x, mean, log_std, data.edge_index)
-        kl_loss = model.kl_divergence(mean, log_std)
-        loss = recon_loss + kl_loss
+        loss = model.compute_loss(data)
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
 
+    return total_loss / len(loader)
+
+
+# Dynamic Lambda Regulation
+def adjust_lambda_reg(kl_loss, threshold=0.1):
+    if kl_loss > threshold:
+        return 0.01
+    else:
+        return 0.001
+
+
+# Validation function
+def validate_vae(model, loader):
+    model.eval()
+    total_loss = 0
+    with torch.no_grad():
+        for data in loader:
+            loss = model.compute_loss(data)
+            total_loss += loss.item()
     return total_loss / len(loader)
 
 
@@ -160,35 +265,59 @@ if __name__ == '__main__':
     hidden_channels = 128
     out_channels = 28
     model = VAE(in_channels, hidden_channels, out_channels)
-    num_epochs = 100
+    num_epochs = 50
 
-    # Set up the optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    #
-    # # Training loop
-    # for epoch in range(num_epochs):
-    #     loss = train_vae(model, train_loader, optimizer)
-    #     if epoch % 10 == 0:
-    #         print(f"Epoch: {epoch}, Loss: {loss}")
-    #
-    # # Save the model parameters
-    # torch.save(model.state_dict(), 'model_new_4.pth')
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.9)
+
+    best_validation_loss = float('inf')
+    for epoch in range(num_epochs):
+        train_loss = train_vae(model, train_loader, optimizer)
+        val_loss = validate_vae(model, valid_loader)
+
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.9)
+    best_validation_loss = float('inf')
+    for epoch in range(num_epochs):
+        train_loss = train_vae(model, train_loader, optimizer)
+        val_loss = validate_vae(model, valid_loader)
+
+        # Early stopping based on validation loss (for simplicity, we stop if the validation loss doesn't improve for 10 epochs)
+        if val_loss < best_validation_loss:
+            best_validation_loss = val_loss
+            patience = 10
+            torch.save(model.state_dict(), 'model_best.pth')
+        else:
+            patience -= 1
+            if patience == 0:
+                print("Early stopping!")
+                break
+
+        scheduler.step()
+        if epoch % 10 == 0:
+            print(f"Epoch: {epoch}, Train Loss: {train_loss}, Val Loss: {val_loss}")
+
+    # Save the model parameters
+    torch.save(model.state_dict(), 'model_new_10.pth')
 
     # Define the model
     model = VAE(in_channels, hidden_channels, out_channels)
 
     # Load the model parameters
-    model.load_state_dict(torch.load('C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//model_new_4.pth'))
+    model.load_state_dict(torch.load('C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//model_new_10.pth'))
 
     new_graph = "C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//chi_graph//chig.pdb.pt"
     original_pdb = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//input_chig//chig.pdb'
 
     # Compute embeddings for all nodes in the new graph
     model.eval()
+    model.eval()
     with torch.no_grad():
         new_graph_data = torch.load(new_graph)
+
+        # Normalize only numerical features using the mean and std computed from the training dataset
         new_graph_data.x[:, numerical_indicies] = (new_graph_data.x[:, numerical_indicies] - dataset.mean) / dataset.std
-        mean, log_std = model.encode(new_graph_data.x, new_graph_data.edge_index)
+
+        x1, mean, log_std = model.encode(new_graph_data.x, new_graph_data.edge_index)
         new_embeddings = model.reparameterize(mean, log_std).cpu().numpy()
 
     # Extract atom information from the PDB file
@@ -234,10 +363,10 @@ if __name__ == '__main__':
 
     # Perform hierarchical Clustering
     cluster = AgglomerativeClustering(n_clusters=None, distance_threshold=cut_height, linkage='ward')
-    labels = cluster.fit_predict(new_embeddings)
+    labels = cluster.fit_predict(combined_embeddings)
 
 
-def list_atoms_per_cluster(labels, atom_info, output_file="clusters_info.txt"):
+def list_atoms_per_cluster(labels, atom_info, output_file="clusters_info_10.txt"):
     # Create a dictionary to store atom info for each cluster
     clusters_dict = defaultdict(list)
 
@@ -283,7 +412,7 @@ def generate_colored_pdb(labels, original_pdb_path, output_pdb_path):
 
 
 # Specify the path for the new PDB file
-output_pdb_path = "colored_clusters.pdb"
+output_pdb_path = "colored_clusters_10.pdb"
 original_pdb = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//input_chig//chig.pdb'
 
 # Generate the colored PDB file
