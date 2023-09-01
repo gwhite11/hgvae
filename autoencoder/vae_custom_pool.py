@@ -5,54 +5,108 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, random_split
 from torch_geometric.data import Batch
 from torch.nn import Linear, Dropout, BatchNorm1d
+import matplotlib.pyplot as plt
 from sklearn.cluster import AgglomerativeClustering
 from scipy.cluster.hierarchy import dendrogram, linkage
 from collections import defaultdict
-from torch_geometric.nn import SAGEConv, SAGPooling
-from Bio.PDB import PDBParser, PDBIO, Structure, Model, Chain, Residue, Atom
-from collections import Counter
-import csv
-import networkx as nx
-import numpy as np
-from torch_geometric.utils import to_networkx
-import matplotlib.pyplot as plt
+from Bio.PDB import *
+from torch_geometric.nn import SAGEConv, SAGPooling, GCNConv
+import pytorch_lightning as pl
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-# Pooling code
+def normalized_laplacian(edge_index, num_nodes=None):
+    if edge_index.shape[0] != 2:
+        raise ValueError(f"Expected edge_index to have shape (2, E), but got {edge_index.shape}.")
+
+    # Ensure that num_nodes is provided and is greater than the maximum node index in edge_index
+    if num_nodes is None:
+        raise ValueError("num_nodes must be provided.")
+    max_index = edge_index.max()
+    if max_index >= num_nodes:
+        raise ValueError(f"Invalid edge_index, max index is {max_index}, but num_nodes is {num_nodes}.")
+
+    deg = compute_degree(edge_index, num_nodes=num_nodes)
+    deg_inv_sqrt = deg.pow(-0.5)
+    deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
+
+    # Convert edge_index to a dense adjacency matrix
+    adj = torch_geometric.utils.to_dense_adj(edge_index, max_num_nodes=num_nodes)[0]
+    identity = torch.eye(num_nodes, device=adj.device)
+
+    # Compute the normalized Laplacian
+    L = identity - torch.mm(torch.mm(deg_inv_sqrt.diag(), adj), deg_inv_sqrt.diag())
+    print("Shape of edge_index:", edge_index.shape)
+    return L
+
+
+def compute_degree(edge_index, num_nodes=None):
+    row, col = edge_index[0], edge_index[1]
+    out = torch.zeros((num_nodes), dtype=torch.float, device=edge_index.device)
+    return out.scatter_add_(dim=0, index=row, src=torch.ones_like(row).float())
+
+
+def compute_fiedler_value(edge_index, num_nodes=None):
+    L = normalized_laplacian(edge_index, num_nodes=num_nodes)
+    eigvals = torch.linalg.eigvalsh(L)
+    return eigvals[1]  # Assuming eigvals are sorted in ascending order?? (Guess they are)
+
+
+class SpectralRegularizedSAGPooling(SAGPooling):
+    def __init__(self, in_channels, alpha=0.5, ratio=0.5, GNN=GCNConv, **kwargs):
+        super(SpectralRegularizedSAGPooling, self).__init__(in_channels, ratio=ratio, GNN=GNN, **kwargs)
+
+        # Keep additional attributes like alpha
+        self.alpha = alpha
+
+    def forward(self, x, edge_index, **kwargs):
+        fiedler_before_pooling = compute_fiedler_value(edge_index, x.size(0))
+        out = super(SpectralRegularizedSAGPooling, self).forward(x, edge_index, **kwargs)
+        fiedler_after_pooling = compute_fiedler_value(out[1], out[0].size(0))
+
+        spectral_loss = (fiedler_before_pooling - fiedler_after_pooling).abs()
+
+        # Convert the tuple to a list for modification
+        out_list = list(out)
+
+        if out_list[2] is None:
+            out_list[2] = self.alpha * spectral_loss
+        else:
+            out_list[2] += self.alpha * spectral_loss
+
+        # Convert the list back to a tuple
+        out = tuple(out_list)
+
+        return out
+
+
 class PoolGraph(torch.nn.Module):
     def __init__(self, num_node_features):
         super().__init__()
-        self.pool1 = SAGPooling(num_node_features)
+        self.pool1 = SpectralRegularizedSAGPooling(num_node_features)
 
     def forward(self, x, edge_index, batch):
         x, edge_index, _, batch, _, _ = self.pool1(x, edge_index, batch=batch)
         return torch_geometric.data.Data(x=x, edge_index=edge_index, batch=batch)
 
 
-# Unpooling code
 class PoolUnpoolGraph(torch.nn.Module):
     def __init__(self, num_node_features):
         super().__init__()
-        self.pool1 = SAGPooling(num_node_features)
+        self.pool1 = SpectralRegularizedSAGPooling(num_node_features)
 
     def forward(self, x, edge_index, batch):
         x_cg, edge_index_cg, _, _, perm, _ = self.pool1(x, edge_index, batch=batch)
 
-        # Create a new batch assignment for the unpooled nodes
-        new_batch = batch[perm]
+        # Update the number of nodes after unpooling
+        num_nodes_unpooled = x_cg.size(0)
 
-        # Use the 'perm' tensor directly for unpooling. This perm tensor gives
-        # the ordering of nodes after pooling, so use it to obtain the mapping
-        x_unpooled = x[perm]
-
-        # Unpool the edge indices using the perm tensor
-        edge_index_unpooled = torch.stack([perm[edge_index_cg[0]],
-                                           perm[edge_index_cg[1]]], dim=0)
-
-        return x_unpooled, x_cg, edge_index_unpooled, new_batch
+        # Return the updated num_nodes_unpooled
+        return x_cg, edge_index_cg, num_nodes_unpooled
 
 
-class VAE(torch.nn.Module):
+class VAE(pl.LightningModule):
     def __init__(self, in_channels, hidden_channels, out_channels, n_samples=10, beta=0.5):
         super(VAE, self).__init__()
         self.dropout_prob = 0.5
@@ -135,7 +189,7 @@ class VAE(torch.nn.Module):
         z = self.reparameterize(mean, log_std)
         reconstruction = self.decode(z, x1)
 
-        x_unpooled, _, edge_index_unpooled, new_batch = self.pool_unpool_graph(x1, edge_index, batch)
+        x_unpooled, edge_index_unpooled, new_batch = self.pool_unpool_graph(x1, edge_index, batch)
 
         return reconstruction, x_unpooled, edge_index_unpooled, mean, log_std, x1  # Added x1 to the return values
 
@@ -151,31 +205,32 @@ class VAE(torch.nn.Module):
         return kl_loss.mean()
 
 
-def train_vae(model, loader, optimizer, clip_value=None):
-    model.train()
+def train_vae(model, loader, optimizer, clip_value=None, device=None):
+    model.to(device)  # Move the model to GPU
 
+    model.train()
     total_loss = 0
     for data in loader:
+        # Move the data to the GPU
+        data.x = data.x.to(device)
+        data.edge_index = data.edge_index.to(device)
+        data.batch = data.batch.to(device)
+
         optimizer.zero_grad()
-
         reconstruction, _, _, mean, log_std, x1 = model(data.x, data.edge_index, data.batch)
-
         recon_loss = model.recon_loss(reconstruction, data.x, mean, log_std, data.edge_index, x1)
         kl_loss = model.kl_divergence(mean, log_std)
 
-        # Scale the KL divergence term with beta
+        # If the pooling layer returns the spectral preservation loss, add it to the total loss
         total_vae_loss = recon_loss + model.beta * kl_loss
 
         total_vae_loss.backward()
-
-        # Apply gradient clipping
         if clip_value is not None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
-
         optimizer.step()
         total_loss += total_vae_loss.item()
-
     return total_loss / len(loader)
+
 
 
 class CustomGraphDataset(Dataset):
@@ -220,7 +275,7 @@ if __name__ == '__main__':
     # Perform the split
     train_dataset, valid_dataset = random_split(dataset, [train_size, valid_size])
 
-    batch_size = 1  # Adjust the batch size if memory crashes
+    batch_size = 2 # Adjust the batch size if memory crashes
 
     # Create data loaders for training and validation sets
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True, num_workers=0,
@@ -347,108 +402,3 @@ original_pdb = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//
 
 # Generate the colored PDB file
 generate_colored_pdb(labels, original_pdb, output_pdb_path)
-
-
-def visualize_clusters(data, labels, original_pdb):
-    # Atomic masses mapping
-    atomic_masses = {
-        'H': 1.008,
-        'C': 12.01,
-        'N': 14.01,
-        'O': 16.00
-    }
-
-    # Parse the original PDB file
-    parser = PDBParser()
-    structure = parser.get_structure("original", original_pdb)
-
-    # Extract the coordinates and identities of each atom
-    atom_info = {}
-    for model in structure:
-        for chain in model:
-            for residue in chain:
-                for atom in residue:
-                    atom_info[atom.serial_number] = {'coord': atom.coord.tolist(),
-                                                     'residue_name': residue.resname,
-                                                     'atom_name': atom.name}
-
-    # Convert the PyTorch Geometric graph data to a NetworkX graph
-    G = to_networkx(data)
-
-    # Check if the graph is directed
-    if data.is_directed():
-        G = G.to_directed()
-
-    # Create a color map from cluster labels
-    cmap = [labels[node] for node in G]
-
-    plt.figure(figsize=(8, 8))
-    nx.draw(G, node_color=cmap, with_labels=True, cmap=plt.cm.tab10)
-    plt.show()
-
-    # Save the coarse-grained graph to a PDB file
-    coarse_grained_graph = Structure.Structure("H")
-    model = Model.Model(0)
-    chain = Chain.Chain("A")
-    model.add(chain)
-    coarse_grained_graph.add(model)
-
-    # Create clusters of atoms (or 'beads')
-    clusters = {}
-    for node, label in enumerate(labels):
-        if label in clusters:
-            clusters[label].append(node)
-        else:
-            clusters[label] = [node]
-
-    # For writing to CSV
-    with open('outputs/beads_to_atoms_12.csv', 'w', newline='') as csvfile:
-        beadwriter = csv.writer(csvfile)
-        beadwriter.writerow(["BeadID", "ImportantAtom", "AllAtomsInCluster", "Mass"])
-
-        # Unique Bead ID and bead types
-        unique_bead_id = 1
-        bead_types = {}
-
-        # Assign atom coordinates in each cluster by their centroid
-        for label, nodes in clusters.items():
-            # Use the coordinates from the original PDB file
-            centroid_atoms = []
-            bead_mass = 0  # initialize the bead's mass
-
-            try:
-                centroid = np.mean([atom_info[node + 1]['coord'] for node in nodes], axis=0)
-                for node in nodes:
-                    atom_name = atom_info[node + 1]['atom_name']
-                    centroid_atoms.append(
-                        f"{atom_name} ({atom_info[node + 1]['residue_name']})")
-                    bead_mass += atomic_masses.get(atom_name[0], 0)  # accumulate mass based on atom type
-            except KeyError as e:
-                print(f'KeyError: {e} not found in atom_info')
-
-            atom_types = [atom_info[node + 1]['atom_name'] for node in nodes]
-            residue_types = [atom_info[node + 1]['residue_name'] for node in nodes]
-
-            most_common_atom_type = Counter(atom_types).most_common(1)[0][0]
-            most_common_residue_type = Counter(residue_types).most_common(1)[0][0]
-            most_common_element = most_common_atom_type[0]
-
-            # Determine bead type
-            atom_set = tuple(sorted(set(atom_types)))
-            if atom_set not in bead_types:
-                bead_types[atom_set] = unique_bead_id
-                unique_bead_id += 1
-
-            # Write to CSV
-            beadwriter.writerow([f"B{bead_types[atom_set]:03d}", most_common_atom_type, "; ".join(centroid_atoms), bead_mass])
-
-            # Continue with the PDB writing
-            residue = Residue.Residue((" ", label, " "), most_common_residue_type, " ")
-            atom = Atom.Atom(most_common_atom_type, centroid.tolist(), 1, 0, " ",
-                             most_common_atom_type, label, most_common_element)
-            residue.add(atom)
-            chain.add(residue)
-
-        io = PDBIO()
-        io.set_structure(coarse_grained_graph)
-        io.save("coarse_grained_graph_20.pdb")
