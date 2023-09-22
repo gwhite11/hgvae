@@ -17,80 +17,65 @@ import matplotlib.pyplot as plt
 from Bio.PDB import PDBParser, PDBIO, Structure, Model, Chain, Residue, Atom
 from torch_geometric.nn import SAGEConv, SAGPooling, GCNConv
 import pytorch_lightning as pl
-from torch.nn.functional import mse_loss
+from torch_geometric.utils import to_dense_adj
+
 
 # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 device = torch.device('cpu')
 
 
-def normalized_laplacian(edge_index, num_nodes=None):
-    if edge_index.shape[0] != 2:
-        raise ValueError(f"Expected edge_index to have shape (2, E), but got {edge_index.shape}.")
-
-    # Ensure that num_nodes is provided and is greater than the maximum node index in edge_index
-    if num_nodes is None:
-        raise ValueError("num_nodes must be provided.")
-    max_index = edge_index.max()
-    if max_index >= num_nodes:
-        raise ValueError(f"Invalid edge_index, max index is {max_index}, but num_nodes is {num_nodes}.")
-
-    deg = compute_degree(edge_index, num_nodes=num_nodes)
-    deg_inv_sqrt = deg.pow(-0.5)
-    deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
-
-    # Convert edge_index to a dense adjacency matrix
-    adj = torch_geometric.utils.to_dense_adj(edge_index, max_num_nodes=num_nodes)[0]
-    identity = torch.eye(num_nodes, device=adj.device)
-
-    # Compute the normalized Laplacian
-    L = identity - torch.mm(torch.mm(deg_inv_sqrt.diag(), adj), deg_inv_sqrt.diag())
-    print("Shape of edge_index:", edge_index.shape)
-    return L
+def box_counting(coords, epsilon):
+    min_coords = np.min(coords, axis=0)
+    max_coords = np.max(coords, axis=0)
+    num_boxes = np.ceil((max_coords - min_coords) / epsilon).astype(int)
+    translated_coords = coords - min_coords
+    box_indices = np.floor(translated_coords / epsilon).astype(int)
+    unique_boxes = np.unique(box_indices, axis=0)
+    return len(unique_boxes)
 
 
-def compute_degree(edge_index, num_nodes=None):
-    row, col = edge_index[0], edge_index[1]
-    out = torch.zeros((num_nodes), dtype=torch.float, device=edge_index.device)
-    return out.scatter_add_(dim=0, index=row, src=torch.ones_like(row).float())
+def compute_fractal_dimension(coords, adj_matrix):
+    node_fractal_dimensions = []
+    for i in range(coords.shape[0]):
+        neighbors = np.where(adj_matrix[i, :] == 1)[0]
+        local_coords = coords[neighbors, :]
+        fractal_dimension = box_counting(local_coords, epsilon=0.1)
+        node_fractal_dimensions.append(fractal_dimension)
+    return np.array(node_fractal_dimensions)
 
 
-def compute_fiedler_value(edge_index, num_nodes=None):
-    L = normalized_laplacian(edge_index, num_nodes=num_nodes)
-    eigvals = torch.linalg.eigvalsh(L)
-    return eigvals[1]
-
-
-class SpectralRegularizedSAGPooling(SAGPooling):
+class FractalRegularizedSAGPooling(SAGPooling):
     def __init__(self, in_channels, alpha=0.5, ratio=0.5, GNN=GCNConv, **kwargs):
-        super(SpectralRegularizedSAGPooling, self).__init__(in_channels, ratio=ratio, GNN=GNN, **kwargs)
-
+        super(FractalRegularizedSAGPooling, self).__init__(in_channels, ratio=ratio, GNN=GNN, **kwargs)
         self.alpha = alpha
 
     def forward(self, x, edge_index, **kwargs):
-        fiedler_before_pooling = compute_fiedler_value(edge_index, x.size(0))
-        out = super(SpectralRegularizedSAGPooling, self).forward(x, edge_index, **kwargs)
-        fiedler_after_pooling = compute_fiedler_value(out[1], out[0].size(0))
+        adj_before_pooling = to_dense_adj(edge_index, max_num_nodes=x.size(0))[0]
+        adj_matrix_np = adj_before_pooling.cpu().numpy()
+        fractal_before_pooling = compute_fractal_dimension(x.cpu().numpy(), adj_matrix_np)
 
-        spectral_loss = (fiedler_before_pooling - fiedler_after_pooling).abs()
+        out = super(FractalRegularizedSAGPooling, self).forward(x, edge_index, **kwargs)
 
-        # Convert the tuple to a list for modification
+        adj_after_pooling = to_dense_adj(out[1], max_num_nodes=out[0].size(0))[0]
+        adj_matrix_np_after = adj_after_pooling.cpu().numpy()
+        fractal_after_pooling = compute_fractal_dimension(out[0].cpu().numpy(), adj_matrix_np_after)
+
+        fractal_loss = np.abs(fractal_before_pooling - fractal_after_pooling).mean()
+        fractal_loss_tensor = torch.tensor(fractal_loss, device=x.device, dtype=x.dtype)
+
         out_list = list(out)
-
         if out_list[2] is None:
-            out_list[2] = self.alpha * spectral_loss
+            out_list[2] = self.alpha * fractal_loss_tensor
         else:
-            out_list[2] += self.alpha * spectral_loss
+            out_list[2] += self.alpha * fractal_loss_tensor
 
-        # Convert the list back to a tuple
-        out = tuple(out_list)
-
-        return out
+        return tuple(out_list)
 
 
 class PoolGraph(torch.nn.Module):
     def __init__(self, num_node_features):
         super().__init__()
-        self.pool1 = SpectralRegularizedSAGPooling(num_node_features)
+        self.pool1 = FractalRegularizedSAGPooling(num_node_features)
 
     def forward(self, x, edge_index, batch):
         x, edge_index, _, batch, _, _ = self.pool1(x, edge_index, batch=batch)
@@ -100,7 +85,7 @@ class PoolGraph(torch.nn.Module):
 class PoolUnpoolGraph(torch.nn.Module):
     def __init__(self, num_node_features):
         super().__init__()
-        self.pool1 = SpectralRegularizedSAGPooling(num_node_features)
+        self.pool1 = FractalRegularizedSAGPooling(num_node_features)
 
     def forward(self, x, edge_index, batch):
         x_cg, edge_index_cg, _, _, perm, _ = self.pool1(x, edge_index, batch=batch)
@@ -202,24 +187,23 @@ class VAE(pl.LightningModule):
 
         return reconstruction, x_unpooled, edge_index_unpooled, mean, log_std, x1  # Added x1 to the return values
 
-    # Add a function to compute the MSE difference between pooled and unpooled eigenvalues
-    def mse_diff_eigen(self, edge_index_pooled, edge_index_unpooled, num_nodes):
-        eigvals_pooled = torch.linalg.eigvalsh(normalized_laplacian(edge_index_pooled, num_nodes=num_nodes))
-        eigvals_unpooled = torch.linalg.eigvalsh(normalized_laplacian(edge_index_unpooled, num_nodes=num_nodes))
-        mse_diff = mse_loss(eigvals_pooled, eigvals_unpooled)
-        return mse_diff
-
     def recon_loss(self, x_recon, x_original, mean, log_std, edge_index, x1, edge_index_unpooled):
         z = self.reparameterize(mean, log_std)
         x_decoded = self.decode(z, x1)
         recon_loss = F.mse_loss(x_decoded, x_original, reduction='mean')
 
-        # Add the eigenvalue MSE difference to the reconstruction loss
-        num_nodes = edge_index.max().item() + 1
-        eigen_mse_diff = self.mse_diff_eigen(edge_index, edge_index_unpooled, num_nodes)
+        # Compute fractal dimensions before and after pooling
+        adj_before_pooling = torch_geometric.utils.to_dense_adj(edge_index, max_num_nodes=x_original.size(0))[0]
+        fractal_before_pooling = compute_fractal_dimension(adj_before_pooling)
 
-        # Add a scaling factor (e.g., 0.1) to control the contribution of the eigenvalue loss term
-        return recon_loss + 0.1 * eigen_mse_diff
+        adj_after_pooling = torch_geometric.utils.to_dense_adj(edge_index_unpooled, max_num_nodes=x_recon.size(0))[0]
+        fractal_after_pooling = compute_fractal_dimension(adj_after_pooling)
+
+        # Calculate the difference
+        fractal_diff = F.mse_loss(fractal_before_pooling, fractal_after_pooling, reduction='mean')
+
+        # Add a scaling factor (e.g., 0.1) to control the contribution of the fractal loss term
+        return recon_loss + 0.1 * fractal_diff
 
     def kl_divergence(self, mean, log_std):
         std = log_std.exp()
@@ -233,17 +217,27 @@ def train_vae(model, loader, optimizer, clip_value=None, device=None):
     model.train()
     total_loss = 0
     for data in loader:
-        # Move the data to the GPU
         data.x = data.x.to(device)
         data.edge_index = data.edge_index.to(device)
         data.batch = data.batch.to(device)
 
-        optimizer.zero_grad()
-        reconstruction, x_unpooled, edge_index_unpooled, mean, log_std, x1 = model(data.x, data.edge_index, data.batch)  # Note the addition of edge_index_unpooled
-        recon_loss = model.recon_loss(reconstruction, data.x, mean, log_std, data.edge_index, x1, edge_index_unpooled)  # Pass edge_index_unpooled as well
-        kl_loss = model.kl_divergence(mean, log_std)
+        # Get coordinates and adjacency matrix from the data
+        coords = data.pos.cpu().numpy()  # Assuming pos stores the coordinates
+        adj_matrix = torch_geometric.utils.to_dense_adj(data.edge_index, batch=data.batch).cpu().numpy()[0]
 
-        # If the pooling layer returns the spectral preservation loss, add it to the total loss
+        # Calculate fractal dimensions
+        node_fractal_dimensions = compute_fractal_dimension(coords, adj_matrix)
+        x_with_fractal = np.hstack([data.x.cpu().numpy(), node_fractal_dimensions.reshape(-1, 1)])
+
+        # Now use `x_with_fractal` as input to your VAE
+        x_with_fractal = torch.tensor(x_with_fractal).float().to(device)  # Convert it back to tensor and move to device
+
+        optimizer.zero_grad()
+        reconstruction, _, _, mean, log_std, _ = model(x_with_fractal, data.edge_index, data.batch)
+
+        # The rest remains the same.
+        recon_loss = model.recon_loss(reconstruction, x_with_fractal, mean, log_std, data.edge_index)
+        kl_loss = model.kl_divergence(mean, log_std)
         total_vae_loss = recon_loss + model.beta * kl_loss
 
         total_vae_loss.backward()
@@ -309,7 +303,7 @@ if __name__ == '__main__':
     hidden_channels = 168  # try using fewer layers
     out_channels = 42  # try smaller bottleneck
     model = VAE(in_channels, hidden_channels, out_channels, beta=0.5)
-    num_epochs = 10
+    num_epochs = 30
     clip_value = 1
 
     # Set up the optimizer

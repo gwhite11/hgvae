@@ -52,7 +52,6 @@ class PoolUnpoolGraph(torch.nn.Module):
         return x_unpooled, x_cg, edge_index_unpooled, new_batch
 
 
-
 class VAE(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels, n_samples=10):
         super(VAE, self).__init__()
@@ -216,7 +215,7 @@ if __name__ == '__main__':
     hidden_channels = 138
     out_channels = 28
     model = VAE(in_channels, hidden_channels, out_channels)
-    num_epochs = 100
+    num_epochs = 30
 
     # Set up the optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)

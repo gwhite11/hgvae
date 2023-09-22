@@ -98,7 +98,7 @@ def pdb_to_pyg_data(pdb_file, output_directory):
 
     # Node features
     coords = np.array([G.nodes[i]['coords'] for i in G.nodes])
-    node_features = np.hstack((coords, atom_features, residue_features))
+    node_features = np.hstack((atom_features, residue_features))  # Removed coords from node features to store it separately
     node_features = torch.tensor(node_features, dtype=torch.float)
 
     # Edge indices
@@ -119,11 +119,12 @@ def pdb_to_pyg_data(pdb_file, output_directory):
             angle = calculate_angle(start_coords, middle_coords, end_coords)
             G.edges[edge]['angle'] = angle
 
-    # Create PyTorch Geometric Data object with additional edge features (angles)
+    # Create PyTorch Geometric Data object with additional edge features (angles) and pos attribute for coordinates
     edge_attr = [G.edges[edge].get('angle', 0.0) for edge in G.edges]
     edge_attr = torch.tensor(edge_attr, dtype=torch.float).view(-1, 1)
 
-    data = Data(x=node_features, edge_index=edge_index, edge_attr=edge_attr)
+    # Here, we add the pos attribute
+    data = Data(x=node_features, edge_index=edge_index, edge_attr=edge_attr, pos=torch.tensor(coords, dtype=torch.float))
 
     # Save the graph data
     output_file = os.path.join(output_directory, os.path.basename(pdb_file) + '.pt')
@@ -133,10 +134,10 @@ def pdb_to_pyg_data(pdb_file, output_directory):
 
 
 # Specify the path to your directory with pdb files
-pdb_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//pdb_files_7'
+pdb_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//input_chig'
 
 # Specify the path to your output directory
-output_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//pdb_graph_7'
+output_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//chi_structural'
 
 # Get all pdb files in the directory
 pdb_files = glob.glob(os.path.join(pdb_directory, '*.pdb'))
