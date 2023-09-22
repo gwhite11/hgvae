@@ -285,7 +285,7 @@ def collate_fn(batch):
 
 
 if __name__ == '__main__':
-    data_folder = "C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//graphs_2"
+    data_folder = ".//pdb_files//graphs_2"
     numerical_indicies = [0, 1, 2, 3, 4, 5]
     dataset = CustomGraphDataset(data_folder, numerical_indicies)
 
@@ -328,10 +328,10 @@ if __name__ == '__main__':
     model = VAE(in_channels, hidden_channels, out_channels)
 
     # Load the model parameters
-    model.load_state_dict(torch.load('C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//model_new_8.pth'))
+    model.load_state_dict(torch.load('.//model_new_8.pth'))
 
-    new_graph = "C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//chi_graph//chig.pdb.pt"
-    original_pdb = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//input_chig//chig.pdb'
+    new_graph = ".//pdb_files//chi_graph//chig.pdb.pt"
+    original_pdb = './/pdb_files//input_chig//chig.pdb'
 
     model.eval()
     with torch.no_grad():
@@ -419,7 +419,7 @@ def generate_colored_pdb(labels, original_pdb_path, output_pdb_path):
 
 # Specify the path for the new PDB file
 output_pdb_path = "colored_clusters_6.pdb"
-original_pdb = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//input_chig//chig.pdb'
+original_pdb = './/pdb_files//input_chig//chig.pdb'
 
 # Generate the colored PDB file
 generate_colored_pdb(labels, original_pdb, output_pdb_path)
