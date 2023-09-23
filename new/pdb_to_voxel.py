@@ -37,8 +37,8 @@ def pdb_to_voxel(pdb_file, grid_size=32, padding=1.0):
 
 
 # Directory paths
-input_dir = "C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//pdb_files_1"
-output_dir = "C://Users//gemma//PycharmProjects//pythonProject1//new//voxel_data"
+input_dir = "C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//input_chig"
+output_dir = "C://Users//gemma//PycharmProjects//pythonProject1//new//voxel_data//chig"
 
 # Create the output directory if it doesn't exist
 if not os.path.exists(output_dir):
