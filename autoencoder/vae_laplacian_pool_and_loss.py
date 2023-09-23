@@ -254,6 +254,59 @@ def train_vae(model, loader, optimizer, clip_value=None, device=None):
     return total_loss / len(loader)
 
 
+def validate_vae(model, loader, device=None):
+    model.to(device)  # Move the model to GPU
+
+    model.eval()  # Set the model to evaluation mode
+    total_loss = 0
+    with torch.no_grad():  # No gradients are required for validation
+        for data in loader:
+            # Move the data to the GPU
+            data.x = data.x.to(device)
+            data.edge_index = data.edge_index.to(device)
+            data.batch = data.batch.to(device)
+
+            reconstruction, x_unpooled, edge_index_unpooled, mean, log_std, x1 = model(data.x, data.edge_index, data.batch)  # Get the outputs from the model
+            recon_loss = model.recon_loss(reconstruction, data.x, mean, log_std, data.edge_index, x1, edge_index_unpooled)
+            kl_loss = model.kl_divergence(mean, log_std)
+
+            # Compute the total loss for validation
+            total_vae_loss = recon_loss + model.beta * kl_loss
+
+            total_loss += total_vae_loss.item()
+
+    return total_loss / len(loader)
+
+
+def compute_rmsd(coords1, coords2):
+    """Compute RMSD between two sets of coordinates"""
+    assert coords1.size() == coords2.size(), "Coordinate tensors must have the same shape"
+
+    diff = coords1 - coords2
+    squared_diff = diff * diff
+    mean_squared_diff = squared_diff.mean(dim=-1)
+    rmsd = torch.sqrt(mean_squared_diff).mean()
+    return rmsd
+
+
+def test_vae_rmsd(model, loader):
+    model.eval()
+    total_rmsd = 0
+
+    with torch.no_grad():
+        for data in loader:
+            reconstruction, *_ = model(data.x, data.edge_index, data.batch)
+
+            # the coordinates are stored in the first 3 columns of data.x
+            original_coords = data.x[:, :3]
+            reconstructed_coords = reconstruction[:, :3]
+
+            rmsd = compute_rmsd(original_coords, reconstructed_coords)
+            total_rmsd += rmsd.item()
+
+    return total_rmsd / len(loader)
+
+
 class CustomGraphDataset(Dataset):
     def __init__(self, data_folder, numerical_indices):
         self.data_file_list = [os.path.join(data_folder, filename) for filename in os.listdir(data_folder) if
@@ -315,216 +368,233 @@ if __name__ == '__main__':
     # Set up the optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)  # try different optimizers?
 
-    # Training loop
-    for epoch in range(num_epochs):
-        loss = train_vae(model, train_loader, optimizer, clip_value)
-        if epoch % 10 == 0:
-            print(f"Epoch: {epoch}, Loss: {loss}")
+    # # Training loop
+    # for epoch in range(num_epochs):
+    #     loss = train_vae(model, train_loader, optimizer, clip_value)
+    #     if epoch % 10 == 0:
+    #         print(f"Epoch: {epoch}, Loss: {loss}")
+    #
+    # # Save the model parameters
+    # torch.save(model.state_dict(), 'model_new_8.pth')
 
-    # Save the model parameters
-    torch.save(model.state_dict(), 'model_new_8.pth')
+    # testing code:
 
-    # Define the model
+    # Step 1: Load the model's saved state
+    model_path = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//model_new_8.pth'
     model = VAE(in_channels, hidden_channels, out_channels)
-
-    # Load the model parameters
-    model.load_state_dict(torch.load('.//model_new_8.pth'))
-
-    new_graph = ".//pdb_files//chi_graph//chig.pdb.pt"
-    original_pdb = './/pdb_files//input_chig//chig.pdb'
-
+    model.load_state_dict(torch.load(model_path))
     model.eval()
-    with torch.no_grad():
-        new_graph_data = torch.load(new_graph)
-        new_graph_data.x[:, numerical_indicies] = (new_graph_data.x[:, numerical_indicies] - dataset.mean) / dataset.std
-        x1, mean, log_std = model.encode(new_graph_data.x, new_graph_data.edge_index)
-        new_embeddings = model.reparameterize(mean, log_std).cpu().numpy()
 
-    # Extract atom information from the PDB file
-    parser = PDBParser()
-    structure = parser.get_structure("original", original_pdb)
-    atom_info = {}
-    for model in structure:
-        for chain in model:
-            for residue in chain:
-                for atom in residue:
-                    atom_info[atom.serial_number] = {
-                        'coord': atom.coord.tolist(),
-                        'residue_name': residue.resname,
-                        'atom_name': atom.name
-                    }
+    # Step 2: Initialize the DataLoader for the test set
+    test_dataset = CustomGraphDataset(data_folder, numerical_indicies)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, drop_last=True, num_workers=0,
+                             collate_fn=collate_fn)
 
-    # Use Agglomerative Clustering
-    linked = linkage(new_embeddings, 'ward')
+    # Step 3: Evaluate the model on the test set using RMSD
+    test_rmsd = test_vae_rmsd(model, test_loader)
+    print(f"Test RMSD: {test_rmsd}")
 
-    # Plot the dendrogram to visualize the structure
-    plt.figure(figsize=(19, 10))
-    dendrogram(linked)
-    plt.title('Dendrogram')
-    plt.ylabel('Euclidean distances')
-    plt.show()
-
-    # Decide on a height to cut the dendrogram
-    cut_height = float(input("Enter the height at which to cut the dendrogram to form clusters: "))
-
-    # Perform hierarchical Clustering
-    cluster = AgglomerativeClustering(n_clusters=None, distance_threshold=cut_height, linkage='ward')
-    labels = cluster.fit_predict(new_embeddings)
-
-
-def list_atoms_per_cluster(labels, atom_info, output_file="clusters_info_6.txt"):
-    # Create a dictionary to store atom info for each cluster
-    clusters_dict = defaultdict(list)
-
-    # Assign each atom to its respective cluster
-    for atom_serial, label in enumerate(labels, start=1):  # assuming atom serial numbers start from 1
-        clusters_dict[label].append(atom_info[atom_serial])
-
-    # Save the atoms for each cluster into a file
-    with open(output_file, "w") as f:
-        for cluster_label, atoms in clusters_dict.items():
-            f.write(f"Cluster {cluster_label}:\n")
-            for atom in atoms:
-                atom_name = atom['atom_name']
-                residue_name = atom['residue_name']
-                coord = atom['coord']
-                f.write(f"    Atom: {atom_name} (Residue: {residue_name}, Coordinates: {coord})\n")
-            f.write("\n")  # Separate clusters by a newline
-
-    print(f"Clusters info saved to {output_file}.")
-
-    return clusters_dict
-
-
-# Call the function
-clusters_dict = list_atoms_per_cluster(labels, atom_info)
-
-
-def generate_colored_pdb(labels, original_pdb_path, output_pdb_path):
-    # Load the structure from the original PDB file
-    parser = PDBParser()
-    structure = parser.get_structure("original", original_pdb_path)
-
-    # Modify the B-factor of each atom based on its cluster label
-    for atom, label in zip(structure.get_atoms(), labels):
-        atom.set_bfactor(label)
-
-    # Save the modified structure to a new PDB file
-    io = PDBIO()
-    io.set_structure(structure)
-    io.save(output_pdb_path)
-
-    print(f"Colored PDB file saved to {output_pdb_path}.")
-
-
-# Specify the path for the new PDB file
-output_pdb_path = "colored_clusters_6.pdb"
-original_pdb = './/pdb_files//input_chig//chig.pdb'
-
-# Generate the colored PDB file
-generate_colored_pdb(labels, original_pdb, output_pdb_path)
-
-
-def visualize_clusters(data, labels, original_pdb):
-    # Atomic masses mapping
-    atomic_masses = {
-        'H': 1.008,
-        'C': 12.01,
-        'N': 14.01,
-        'O': 16.00
-    }
-
-    # Parse the original PDB file
-    parser = PDBParser()
-    structure = parser.get_structure("original", original_pdb)
-
-    # Extract the coordinates and identities of each atom
-    atom_info = {}
-    for model in structure:
-        for chain in model:
-            for residue in chain:
-                for atom in residue:
-                    atom_info[atom.serial_number] = {'coord': atom.coord.tolist(),
-                                                     'residue_name': residue.resname,
-                                                     'atom_name': atom.name}
-
-    # Convert the PyTorch Geometric graph data to a NetworkX graph
-    G = to_networkx(data)
-
-    # Check if the graph is directed
-    if data.is_directed():
-        G = G.to_directed()
-
-    # Create a color map from cluster labels
-    cmap = [labels[node] for node in G]
-
-    plt.figure(figsize=(8, 8))
-    nx.draw(G, node_color=cmap, with_labels=True, cmap=plt.cm.tab10)
-    plt.show()
-
-    # Save the coarse-grained graph to a PDB file
-    coarse_grained_graph = Structure.Structure("H")
-    model = Model.Model(0)
-    chain = Chain.Chain("A")
-    model.add(chain)
-    coarse_grained_graph.add(model)
-
-    # Create clusters of atoms (or 'beads')
-    clusters = {}
-    for node, label in enumerate(labels):
-        if label in clusters:
-            clusters[label].append(node)
-        else:
-            clusters[label] = [node]
-
-    # For writing to CSV
-    with open('outputs/beads_to_atoms_12.csv', 'w', newline='') as csvfile:
-        beadwriter = csv.writer(csvfile)
-        beadwriter.writerow(["BeadID", "ImportantAtom", "AllAtomsInCluster", "Mass"])
-
-        # Unique Bead ID and bead types
-        unique_bead_id = 1
-        bead_types = {}
-
-        # Assign atom coordinates in each cluster by their centroid
-        for label, nodes in clusters.items():
-            # Use the coordinates from the original PDB file
-            centroid_atoms = []
-            bead_mass = 0  # initialize the bead's mass
-
-            try:
-                centroid = np.mean([atom_info[node + 1]['coord'] for node in nodes], axis=0)
-                for node in nodes:
-                    atom_name = atom_info[node + 1]['atom_name']
-                    centroid_atoms.append(
-                        f"{atom_name} ({atom_info[node + 1]['residue_name']})")
-                    bead_mass += atomic_masses.get(atom_name[0], 0)  # accumulate mass based on atom type
-            except KeyError as e:
-                print(f'KeyError: {e} not found in atom_info')
-
-            atom_types = [atom_info[node + 1]['atom_name'] for node in nodes]
-            residue_types = [atom_info[node + 1]['residue_name'] for node in nodes]
-
-            most_common_atom_type = Counter(atom_types).most_common(1)[0][0]
-            most_common_residue_type = Counter(residue_types).most_common(1)[0][0]
-            most_common_element = most_common_atom_type[0]
-
-            # Determine bead type
-            atom_set = tuple(sorted(set(atom_types)))
-            if atom_set not in bead_types:
-                bead_types[atom_set] = unique_bead_id
-                unique_bead_id += 1
-
-            # Write to CSV
-            beadwriter.writerow([f"B{bead_types[atom_set]:03d}", most_common_atom_type, "; ".join(centroid_atoms), bead_mass])
-
-            # Continue with the PDB writing
-            residue = Residue.Residue((" ", label, " "), most_common_residue_type, " ")
-            atom = Atom.Atom(most_common_atom_type, centroid.tolist(), 1, 0, " ",
-                             most_common_atom_type, label, most_common_element)
-            residue.add(atom)
-            chain.add(residue)
-
-        io = PDBIO()
-        io.set_structure(coarse_grained_graph)
-        io.save("coarse_grained_graph_20.pdb")
+#     # Define the model
+#     model = VAE(in_channels, hidden_channels, out_channels)
+#
+#     # Load the model parameters
+#     model.load_state_dict(torch.load('.//model_new_8.pth'))
+#
+#     new_graph = ".//pdb_files//chi_graph//chig.pdb.pt"
+#     original_pdb = './/pdb_files//input_chig//chig.pdb'
+#
+#     model.eval()
+#     with torch.no_grad():
+#         new_graph_data = torch.load(new_graph)
+#         new_graph_data.x[:, numerical_indicies] = (new_graph_data.x[:, numerical_indicies] - dataset.mean) / dataset.std
+#         x1, mean, log_std = model.encode(new_graph_data.x, new_graph_data.edge_index)
+#         new_embeddings = model.reparameterize(mean, log_std).cpu().numpy()
+#
+#     # Extract atom information from the PDB file
+#     parser = PDBParser()
+#     structure = parser.get_structure("original", original_pdb)
+#     atom_info = {}
+#     for model in structure:
+#         for chain in model:
+#             for residue in chain:
+#                 for atom in residue:
+#                     atom_info[atom.serial_number] = {
+#                         'coord': atom.coord.tolist(),
+#                         'residue_name': residue.resname,
+#                         'atom_name': atom.name
+#                     }
+#
+#     # Use Agglomerative Clustering
+#     linked = linkage(new_embeddings, 'ward')
+#
+#     # Plot the dendrogram to visualize the structure
+#     plt.figure(figsize=(19, 10))
+#     dendrogram(linked)
+#     plt.title('Dendrogram')
+#     plt.ylabel('Euclidean distances')
+#     plt.show()
+#
+#     # Decide on a height to cut the dendrogram
+#     cut_height = float(input("Enter the height at which to cut the dendrogram to form clusters: "))
+#
+#     # Perform hierarchical Clustering
+#     cluster = AgglomerativeClustering(n_clusters=None, distance_threshold=cut_height, linkage='ward')
+#     labels = cluster.fit_predict(new_embeddings)
+#
+#
+# def list_atoms_per_cluster(labels, atom_info, output_file="clusters_info_6.txt"):
+#     # Create a dictionary to store atom info for each cluster
+#     clusters_dict = defaultdict(list)
+#
+#     # Assign each atom to its respective cluster
+#     for atom_serial, label in enumerate(labels, start=1):  # assuming atom serial numbers start from 1
+#         clusters_dict[label].append(atom_info[atom_serial])
+#
+#     # Save the atoms for each cluster into a file
+#     with open(output_file, "w") as f:
+#         for cluster_label, atoms in clusters_dict.items():
+#             f.write(f"Cluster {cluster_label}:\n")
+#             for atom in atoms:
+#                 atom_name = atom['atom_name']
+#                 residue_name = atom['residue_name']
+#                 coord = atom['coord']
+#                 f.write(f"    Atom: {atom_name} (Residue: {residue_name}, Coordinates: {coord})\n")
+#             f.write("\n")  # Separate clusters by a newline
+#
+#     print(f"Clusters info saved to {output_file}.")
+#
+#     return clusters_dict
+#
+#
+# # Call the function
+# clusters_dict = list_atoms_per_cluster(labels, atom_info)
+#
+#
+# def generate_colored_pdb(labels, original_pdb_path, output_pdb_path):
+#     # Load the structure from the original PDB file
+#     parser = PDBParser()
+#     structure = parser.get_structure("original", original_pdb_path)
+#
+#     # Modify the B-factor of each atom based on its cluster label
+#     for atom, label in zip(structure.get_atoms(), labels):
+#         atom.set_bfactor(label)
+#
+#     # Save the modified structure to a new PDB file
+#     io = PDBIO()
+#     io.set_structure(structure)
+#     io.save(output_pdb_path)
+#
+#     print(f"Colored PDB file saved to {output_pdb_path}.")
+#
+#
+# # Specify the path for the new PDB file
+# output_pdb_path = "colored_clusters_6.pdb"
+# original_pdb = './/pdb_files//input_chig//chig.pdb'
+#
+# # Generate the colored PDB file
+# generate_colored_pdb(labels, original_pdb, output_pdb_path)
+#
+#
+# def visualize_clusters(data, labels, original_pdb):
+#     # Atomic masses mapping
+#     atomic_masses = {
+#         'H': 1.008,
+#         'C': 12.01,
+#         'N': 14.01,
+#         'O': 16.00
+#     }
+#
+#     # Parse the original PDB file
+#     parser = PDBParser()
+#     structure = parser.get_structure("original", original_pdb)
+#
+#     # Extract the coordinates and identities of each atom
+#     atom_info = {}
+#     for model in structure:
+#         for chain in model:
+#             for residue in chain:
+#                 for atom in residue:
+#                     atom_info[atom.serial_number] = {'coord': atom.coord.tolist(),
+#                                                      'residue_name': residue.resname,
+#                                                      'atom_name': atom.name}
+#
+#     # Convert the PyTorch Geometric graph data to a NetworkX graph
+#     G = to_networkx(data)
+#
+#     # Check if the graph is directed
+#     if data.is_directed():
+#         G = G.to_directed()
+#
+#     # Create a color map from cluster labels
+#     cmap = [labels[node] for node in G]
+#
+#     plt.figure(figsize=(8, 8))
+#     nx.draw(G, node_color=cmap, with_labels=True, cmap=plt.cm.tab10)
+#     plt.show()
+#
+#     # Save the coarse-grained graph to a PDB file
+#     coarse_grained_graph = Structure.Structure("H")
+#     model = Model.Model(0)
+#     chain = Chain.Chain("A")
+#     model.add(chain)
+#     coarse_grained_graph.add(model)
+#
+#     # Create clusters of atoms (or 'beads')
+#     clusters = {}
+#     for node, label in enumerate(labels):
+#         if label in clusters:
+#             clusters[label].append(node)
+#         else:
+#             clusters[label] = [node]
+#
+#     # For writing to CSV
+#     with open('outputs/beads_to_atoms_12.csv', 'w', newline='') as csvfile:
+#         beadwriter = csv.writer(csvfile)
+#         beadwriter.writerow(["BeadID", "ImportantAtom", "AllAtomsInCluster", "Mass"])
+#
+#         # Unique Bead ID and bead types
+#         unique_bead_id = 1
+#         bead_types = {}
+#
+#         # Assign atom coordinates in each cluster by their centroid
+#         for label, nodes in clusters.items():
+#             # Use the coordinates from the original PDB file
+#             centroid_atoms = []
+#             bead_mass = 0  # initialize the bead's mass
+#
+#             try:
+#                 centroid = np.mean([atom_info[node + 1]['coord'] for node in nodes], axis=0)
+#                 for node in nodes:
+#                     atom_name = atom_info[node + 1]['atom_name']
+#                     centroid_atoms.append(
+#                         f"{atom_name} ({atom_info[node + 1]['residue_name']})")
+#                     bead_mass += atomic_masses.get(atom_name[0], 0)  # accumulate mass based on atom type
+#             except KeyError as e:
+#                 print(f'KeyError: {e} not found in atom_info')
+#
+#             atom_types = [atom_info[node + 1]['atom_name'] for node in nodes]
+#             residue_types = [atom_info[node + 1]['residue_name'] for node in nodes]
+#
+#             most_common_atom_type = Counter(atom_types).most_common(1)[0][0]
+#             most_common_residue_type = Counter(residue_types).most_common(1)[0][0]
+#             most_common_element = most_common_atom_type[0]
+#
+#             # Determine bead type
+#             atom_set = tuple(sorted(set(atom_types)))
+#             if atom_set not in bead_types:
+#                 bead_types[atom_set] = unique_bead_id
+#                 unique_bead_id += 1
+#
+#             # Write to CSV
+#             beadwriter.writerow([f"B{bead_types[atom_set]:03d}", most_common_atom_type, "; ".join(centroid_atoms), bead_mass])
+#
+#             # Continue with the PDB writing
+#             residue = Residue.Residue((" ", label, " "), most_common_residue_type, " ")
+#             atom = Atom.Atom(most_common_atom_type, centroid.tolist(), 1, 0, " ",
+#                              most_common_atom_type, label, most_common_element)
+#             residue.add(atom)
+#             chain.add(residue)
+#
+#         io = PDBIO()
+#         io.set_structure(coarse_grained_graph)
+#         io.save("coarse_grained_graph_20.pdb")

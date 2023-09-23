@@ -143,21 +143,79 @@ class VAE(torch.nn.Module):
         return kl_loss.mean()
 
 
-def train_vae(model, loader, optimizer):
+def train_vae(model, loader, optimizer, lambda_kl=1.0):
     model.train()
 
     total_loss = 0
     for data in loader:
         optimizer.zero_grad()
 
-        reconstruction, _, _ = model(data.x, data.edge_index, data.batch)  # Update variable name
+        # Forward pass
+        reconstruction, _, _ = model(data.x, data.edge_index, data.batch)
+
+        # Get the mean and log_std from the encoding
+        _, mean, log_std = model.encode(data.x, data.edge_index)
+
+        # Compute reconstruction loss
         recon_loss = F.mse_loss(reconstruction, data.x, reduction='mean')
 
-        recon_loss.backward()
+        # Compute KL divergence
+        kl_loss = model.kl_divergence(mean, log_std)
+
+        # Combined loss
+        loss = recon_loss + lambda_kl * kl_loss
+
+        # Backpropagate
+        loss.backward()
         optimizer.step()
-        total_loss += recon_loss.item()
+        total_loss += loss.item()
 
     return total_loss / len(loader)
+
+
+def validate_vae(model, loader):
+    model.eval()
+    total_loss = 0
+
+    with torch.no_grad():
+        for data in loader:
+            reconstruction, _, _ = model(data.x, data.edge_index, data.batch)
+            _, mean, log_std = model.encode(data.x, data.edge_index)
+            recon_loss = F.mse_loss(reconstruction, data.x, reduction='mean')
+            kl_loss = model.kl_divergence(mean, log_std)
+            loss = recon_loss + kl_loss
+            total_loss += loss.item()
+
+    return total_loss / len(loader)
+
+
+def compute_rmsd(coords1, coords2):
+    """Compute RMSD between two sets of coordinates"""
+    assert coords1.size() == coords2.size(), "Coordinate tensors must have the same shape"
+
+    diff = coords1 - coords2
+    squared_diff = diff * diff
+    mean_squared_diff = squared_diff.mean(dim=-1)
+    rmsd = torch.sqrt(mean_squared_diff).mean()
+    return rmsd
+
+
+def test_vae_rmsd(model, loader):
+    model.eval()
+    total_rmsd = 0
+
+    with torch.no_grad():
+        for data in loader:
+            reconstruction, _, _ = model(data.x, data.edge_index, data.batch)
+
+            # Assuming the coordinates are stored in the first 3 columns of data.x
+            original_coords = data.x[:, :3]
+            reconstructed_coords = reconstruction[:, :3]
+
+            rmsd = compute_rmsd(original_coords, reconstructed_coords)
+            total_rmsd += rmsd.item()
+
+    return total_rmsd / len(loader)
 
 
 class CustomGraphDataset(Dataset):
@@ -215,25 +273,43 @@ if __name__ == '__main__':
     hidden_channels = 138
     out_channels = 28
     model = VAE(in_channels, hidden_channels, out_channels)
-    num_epochs = 30
+    num_epochs = 10
 
     # Set up the optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
     # Training loop
     for epoch in range(num_epochs):
-        loss = train_vae(model, train_loader, optimizer)
-        if epoch % 10 == 0:
-            print(f"Epoch: {epoch}, Loss: {loss}")
+        train_loss = train_vae(model, train_loader, optimizer)
+        valid_loss = validate_vae(model, valid_loader)
+
+        print(f"Epoch: {epoch}, Train Loss: {train_loss}, Validation Loss: {valid_loss}")
 
     # Save the model parameters
-    torch.save(model.state_dict(), 'model_new_7.pth')
+    torch.save(model.state_dict(), 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//vanilla_vae.pth')
+
+    # testing code:
+
+    # Step 1: Load the model's saved state
+    model_path = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//vanilla_vae.pth'
+    model = VAE(in_channels, hidden_channels, out_channels)
+    model.load_state_dict(torch.load(model_path))
+    model.eval()
+
+    # Step 2: Initialize the DataLoader for the test set
+    test_dataset = CustomGraphDataset(data_folder, numerical_indicies)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, drop_last=True, num_workers=0,
+                             collate_fn=collate_fn)
+
+    # Step 3: Evaluate the model on the test set using RMSD
+    test_rmsd = test_vae_rmsd(model, test_loader)
+    print(f"Test RMSD: {test_rmsd}")
 
     # Define the model
     model = VAE(in_channels, hidden_channels, out_channels)
 
     # Load the model parameters
-    model.load_state_dict(torch.load('C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//model_new_7.pth'))
+    model.load_state_dict(torch.load('C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//vanilla_vae.pth'))
 
     new_graph = "C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//chi_graph//chig.pdb.pt"
     original_pdb = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//input_chig//chig.pdb'
@@ -292,7 +368,7 @@ if __name__ == '__main__':
     labels = cluster.fit_predict(combined_embeddings)
 
 
-def list_atoms_per_cluster(labels, atom_info, output_file="clusters_info_6.txt"):
+def list_atoms_per_cluster(labels, atom_info, output_file="clusters_info_14.txt"):
     # Create a dictionary to store atom info for each cluster
     clusters_dict = defaultdict(list)
 
@@ -338,8 +414,9 @@ def generate_colored_pdb(labels, original_pdb_path, output_pdb_path):
 
 
 # Specify the path for the new PDB file
-output_pdb_path = "colored_clusters_6.pdb"
+output_pdb_path = "colored_clusters_14.pdb"
 original_pdb = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//input_chig//chig.pdb'
 
 # Generate the colored PDB file
 generate_colored_pdb(labels, original_pdb, output_pdb_path)
+
