@@ -158,6 +158,25 @@ def val_fn(loader, model, criterion):
     print(f"Validation Loss: {average_val_loss}")
 
 
+def test_fn(loader, model, criterion):
+    model.eval()
+    test_loss = 0.0
+    with torch.no_grad():
+        for batch_idx, (data,) in enumerate(loader):
+            data = data.to(device)
+            outputs = model(data)
+            loss = criterion(outputs, data.squeeze(1).long())
+            test_loss += loss.item()
+            # You can also compute other metrics here if needed
+
+    average_test_loss = test_loss / len(loader)
+    print(f"Test Loss: {average_test_loss}")
+
+    # Additionally, we can compute RMSD if required
+    rmsd = torch.sqrt(torch.tensor(average_test_loss))
+    print(f"RMSD: {rmsd.item()}")
+
+
 def load_new_file(file_path):
     data = np.load(file_path)
     data = np.expand_dims(data, axis=(0, 1))  # Adding batch and channel dimensions
@@ -175,7 +194,12 @@ def inference(model, new_data, device):
     return predicted_np
 
 
-
+def plot_3d_image(data):
+    fig = plt.figure(figsize=(10, 10))
+    ax = fig.add_subplot(111, projection='3d')
+    x, y, z = data.nonzero()
+    ax.scatter(x, y, z, zdir='z', c='red')
+    plt.show()
 
 
 def main():
@@ -198,10 +222,17 @@ def main():
         # Validation
         val_fn(val_loader, model, criterion)
 
+    # Test the model on the test set after all epochs
+    test_fn(test_loader, model, criterion)
+
     # Save the model parameters
     torch.save(model.state_dict(), 'model_new_vox.pth')
 
+    new_data_path = "C://Users//gemma//PycharmProjects//pythonProject1//new//voxel_data//chig//chig.npy"
+    new_data_tensor = load_new_file(new_data_path)
 
+    output_data = inference(model, new_data_tensor, device)
+    plot_3d_image(output_data[0])  # Visualize the first sample
 
 
 
