@@ -51,20 +51,41 @@ class FractalPooling3D(nn.Module):
         return self.fractal_loss
 
 
+class ChannelAttention(nn.Module):
+    def __init__(self, in_planes, ratio=16):
+        super(ChannelAttention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool3d(1)
+        self.max_pool = nn.AdaptiveMaxPool3d(1)
+
+        self.fc1 = nn.Conv3d(in_planes, in_planes // ratio, 1, bias=False)
+        self.relu1 = nn.ReLU()
+        self.fc2 = nn.Conv3d(in_planes // ratio, in_planes, 1, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = self.fc2(self.relu1(self.fc1(self.avg_pool(x))))
+        max_out = self.fc2(self.relu1(self.fc1(self.max_pool(x))))
+        out = avg_out + max_out
+        return self.sigmoid(out)
+
+
 class DoubleConv(nn.Module):
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels, out_channels, dilation_rate=1):
         super(DoubleConv, self).__init__()
         self.conv = nn.Sequential(
-            nn.Conv3d(in_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.Conv3d(in_channels, out_channels, kernel_size=3, stride=1, padding=dilation_rate, dilation=dilation_rate, bias=False),
             nn.BatchNorm3d(out_channels),
             nn.ReLU(inplace=True),
-            nn.Conv3d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.Conv3d(out_channels, out_channels, kernel_size=3, stride=1, padding=dilation_rate, dilation=dilation_rate, bias=False),
             nn.BatchNorm3d(out_channels),
             nn.ReLU(inplace=True),
         )
 
+        self.ca = ChannelAttention(out_channels)
+
     def forward(self, x):
-        return self.conv(x)
+        x = self.conv(x)
+        return x * self.ca(x) + x
 
 
 class UNET3D(nn.Module):
@@ -74,9 +95,11 @@ class UNET3D(nn.Module):
         self.downs = nn.ModuleList()
         self.pool = FractalPooling3D(kernel_size=2)
 
+        dilation_rates = [1, 2, 4, 8]
+
         # DOWN Part
-        for feature in features:
-            self.downs.append(DoubleConv(in_channels, feature))
+        for feature, dilation_rate in zip(features, dilation_rates):
+            self.downs.append(DoubleConv(in_channels, feature, dilation_rate=dilation_rate))
             in_channels = feature
 
         # UP Part
@@ -106,9 +129,9 @@ class UNET3D(nn.Module):
             x = self.ups[idx](x)
             skip_connection = skip_connections[idx // 2]
 
+            # Interpolation logic
             if x.shape != skip_connection.shape:
-                # Interpolation logic might be needed here if the shapes don't match
-                pass
+                x = nn.functional.interpolate(x, size=skip_connection.shape[2:])
 
             concat_skip = torch.cat((skip_connection, x), dim=1)
             x = self.ups[idx + 1](concat_skip)
@@ -241,11 +264,19 @@ def inference(model, new_data, device):
     return predicted_np
 
 
-def plot_3d_image(data):
-    fig = plt.figure(figsize=(10, 10))
-    ax = fig.add_subplot(111, projection='3d')
-    x, y, z = data.nonzero()
-    ax.scatter(x, y, z, zdir='z', c='red')
+def plot_3d_image(raw_data, cluster_data):
+    fig = plt.figure(figsize=(20, 10))
+
+    ax1 = fig.add_subplot(121, projection='3d')
+    x, y, z = raw_data.nonzero()
+    ax1.scatter(x, y, z, zdir='z', c='red')
+    ax1.set_title('Raw Data')
+
+    ax2 = fig.add_subplot(122, projection='3d')
+    x, y, z = cluster_data.nonzero()
+    ax2.scatter(x, y, z, zdir='z', c=cluster_data[cluster_data.nonzero()])
+    ax2.set_title('Clustered Data')
+
     plt.show()
 
 
@@ -279,8 +310,8 @@ def main():
     new_data_tensor = load_new_file(new_data_path)
 
     output_data = inference(model, new_data_tensor, device)
-    plot_3d_image(output_data[0])  # Visualize the first sample
-
+    raw_data = np.load(new_data_path)
+    plot_3d_image(raw_data, output_data[0])
 
 # Call the main function to start training
 if __name__ == "__main__":
