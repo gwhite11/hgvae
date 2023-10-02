@@ -1,11 +1,12 @@
 import torch
 import torch.nn as nn
 import numpy as np
+from torch.optim.lr_scheduler import StepLR
 import os
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, TensorDataset
-import matplotlib.pyplot as plt
-
+from sklearn.cluster import KMeans
+from Bio.PDB import PDBParser, PDBIO
 
 def box_counting(voxel_data, epsilon):
     non_zero_coords = np.argwhere(voxel_data == 1)
@@ -126,20 +127,18 @@ class UNET3D(nn.Module):
             x = self.pool(x, current_epoch)
 
         x = self.bottleneck(x)
+
         skip_connections = skip_connections[::-1]
 
         for idx in range(0, len(self.ups), 2):
             x = self.ups[idx](x)
             skip_connection = skip_connections[idx // 2]
-
-            # Interpolation logic
             if x.shape != skip_connection.shape:
                 x = nn.functional.interpolate(x, size=skip_connection.shape[2:])
-
             concat_skip = torch.cat((skip_connection, x), dim=1)
             x = self.ups[idx + 1](concat_skip)
 
-        return self.final_conv(x)
+        return self.final_conv(x), skip_connections
 
 
 # Directory containing voxel .npy files
@@ -184,8 +183,8 @@ val_loader = DataLoader(val_dataset, batch_size=4)
 test_loader = DataLoader(test_dataset, batch_size=4)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-batch_size = 16
-num_epochs = 20
+batch_size = 32
+num_epochs = 10
 num_workers = 2
 image_height = 32
 image_width = 32
@@ -199,7 +198,7 @@ def train_fn(loader, model, optimizer, criterion, epoch):
         data, labels = data.to(device), labels.to(device)
 
         # Forward pass
-        outputs = model(data, epoch)
+        outputs, _ = model(data, epoch)
 
         # Compute the primary loss
         loss = criterion(outputs, labels.squeeze(1).long())
@@ -222,7 +221,7 @@ def val_fn(loader, model, criterion):
         for batch_idx, (data, labels) in enumerate(loader):
             data, labels = data.to(device), labels.to(device)
 
-            outputs = model(data, num_epochs)
+            outputs, _ = model(data, num_epochs)
 
             loss = criterion(outputs, labels.squeeze(1).long())
             val_loss += loss.item()
@@ -240,7 +239,7 @@ def test_fn(loader, model, criterion):
         for batch_idx, (data, labels) in enumerate(loader):
             data, labels = data.to(device), labels.to(device)
 
-            outputs = model(data, num_epochs)
+            outputs, _ = model(data, num_epochs)
 
             loss = criterion(outputs, labels.squeeze(1).long())
             test_loss += loss.item()
@@ -254,7 +253,7 @@ def test_fn(loader, model, criterion):
     print(f"Test Loss: {average_test_loss}")
     print(f"Test Accuracy: {accuracy:.2f}%")
 
-    # Additionally, we can compute RMSD if required
+    # compute RMSD
     rmsd = torch.sqrt(torch.tensor(average_test_loss))
     print(f"RMSD: {rmsd.item()}")
 
@@ -270,61 +269,89 @@ def inference(model, new_data, device):
     model.eval()
     with torch.no_grad():
         new_data = new_data.to(device)
-        outputs = model(new_data)
-        _, predicted = torch.max(outputs, 1)
-        predicted_np = predicted.cpu().numpy()
-    return predicted_np
-
-
-def plot_3d_image(raw_data, cluster_data):
-    fig = plt.figure(figsize=(20, 10))
-
-    ax1 = fig.add_subplot(121, projection='3d')
-    x, y, z = raw_data.nonzero()
-    ax1.scatter(x, y, z, zdir='z', c='red')
-    ax1.set_title('Raw Data')
-
-    ax2 = fig.add_subplot(122, projection='3d')
-    x, y, z = cluster_data.nonzero()
-    ax2.scatter(x, y, z, zdir='z', c=cluster_data[cluster_data.nonzero()])
-    ax2.set_title('Clustered Data')
-
-    plt.show()
+        outputs, skip_connections = model(new_data)
+    return skip_connections
 
 
 def main():
     # Initialize the U-Net model
-    model = UNET3D(in_channels=1, out_channels=4)  # this will give 10 clusters
+    model = UNET3D(in_channels=1, out_channels=4)
     model.to(device)
 
-    # Initialize the optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    scheduler = StepLR(optimizer, step_size=5,
+                       gamma=0.95)  # This will decay the learning rate by a factor of 0.95 every 5 epochs
 
     # Initialize the loss function
     criterion = nn.CrossEntropyLoss()
 
-    for epoch in range(num_epochs):
-        print(f"Epoch {epoch + 1}/{num_epochs}")
+    # for epoch in range(num_epochs):
+    #     train_fn(train_loader, model, optimizer, criterion, epoch)
+    #     val_fn(val_loader, model, criterion)
+    #     scheduler.step()
+    #
+    # # Test the model on the test set after all epochs
+    # test_fn(test_loader, model, criterion)
+    #
+    # # Save the model parameters
+    # torch.save(model.state_dict(), 'model_new_vox_2.pth')
 
-        # Training
-        train_fn(train_loader, model, optimizer, criterion, epoch)
-
-        # Validation
-        val_fn(val_loader, model, criterion)
-
-    # Test the model on the test set after all epochs
-    test_fn(test_loader, model, criterion)
-
-    # Save the model parameters
-    torch.save(model.state_dict(), 'model_new_vox_2.pth')
-
+    original_pdb_file = "C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//input_chig//chig.pdb"
     new_data_path = "C://Users//gemma//PycharmProjects//pythonProject1//new//voxel_data//chig//chig.npy"
     new_data_tensor = load_new_file(new_data_path)
 
-    output_data = inference(model, new_data_tensor, device)
-    raw_data = np.load(new_data_path)
-    plot_3d_image(raw_data, output_data[0])
+    def feature_based_clustering(model, new_data_tensor, device, n_clusters=30):
+        # Extract the skip connections for a sample
+        skip_connections = inference(model, new_data_tensor, device)
 
+        # Use one of the skip connections
+        feature_maps = skip_connections[-1]  # using the last skip connection
+
+        # Reshape the feature maps for clustering
+        # Treat each voxel as a data point
+        B, C, H, W, D = feature_maps.shape
+        feature_maps_reshaped = feature_maps.permute(0, 2, 3, 4, 1).reshape(-1, C).cpu().numpy()
+
+        # Apply clustering
+        kmeans = KMeans(n_clusters=n_clusters)
+        clusters = kmeans.fit_predict(feature_maps_reshaped)
+
+        # Reshape clusters back to 3D format to get per-voxel labels
+        cluster_map = clusters.reshape(H, W, D)
+
+        return cluster_map
+
+
+    new_data_path = "C://Users//gemma//PycharmProjects//pythonProject1//new//voxel_data//chig//chig.npy"
+    new_data_tensor = load_new_file(new_data_path)
+    clusters = feature_based_clustering(model, new_data_tensor, device)
+
+    def assign_clusters_to_pdb(original_pdb_file, cluster_map, voxel_size):
+        # Parse the PDB file
+        parser = PDBParser()
+        structure = parser.get_structure('structure', original_pdb_file)
+
+        for model in structure:
+            for chain in model:
+                for residue in chain:
+                    for atom in residue:
+                        # Determine the voxel this atom belongs to
+                        x, y, z = atom.get_coord()
+                        voxel_coord = (int(x / voxel_size), int(y / voxel_size), int(z / voxel_size))
+
+                        # Assign the cluster ID to the atom's b-factor
+                        if 0 <= voxel_coord[0] < cluster_map.shape[0] and \
+                                0 <= voxel_coord[1] < cluster_map.shape[1] and \
+                                0 <= voxel_coord[2] < cluster_map.shape[2]:
+                            atom.bfactor = cluster_map[voxel_coord]
+
+        # Save the modified PDB
+        io = PDBIO()
+        io.set_structure(structure)
+        io.save('clustered.pdb')
+
+    # Adjust voxel_size to your voxel grid dimensions
+    assign_clusters_to_pdb(original_pdb_file, clusters, voxel_size=1.0)
 
 # Call the main function to start training
 if __name__ == "__main__":
