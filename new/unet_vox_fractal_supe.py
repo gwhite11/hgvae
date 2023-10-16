@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from sklearn.cluster import KMeans
 from Bio.PDB import PDBParser, PDBIO
 
+
 def box_counting(voxel_data, epsilon):
     non_zero_coords = np.argwhere(voxel_data == 1)
 
@@ -93,7 +94,7 @@ class DoubleConv(nn.Module):
 
 
 class UNET3D(nn.Module):
-    def __init__(self, in_channels=3, out_channels=1, features=[64, 128, 256, 512]):
+    def __init__(self, in_channels=1, out_channels=3, features=[64, 128, 256, 512]):
         super(UNET3D, self).__init__()
         self.ups = nn.ModuleList()
         self.downs = nn.ModuleList()
@@ -116,7 +117,7 @@ class UNET3D(nn.Module):
             self.ups.append(DoubleConv(feature * 2, feature))
 
         self.bottleneck = DoubleConv(features[-1], features[-1] * 2)
-        self.final_conv = nn.Conv3d(features[0], out_channels, kernel_size=1)
+        self.final_conv = nn.Conv3d(features[0], 3, kernel_size=1)
 
     def forward(self, x, current_epoch=0):
         skip_connections = []
@@ -142,11 +143,12 @@ class UNET3D(nn.Module):
 
 
 # Directory containing voxel .npy files
-input_dir = "C://Users//gemma//PycharmProjects//pythonProject1//new//voxel_data_with_labels"
+input_dir = "C://Users//gemma//PycharmProjects//pythonProject1//new//voxel_data_with_energy"
+
 
 # Get voxel and label files
 voxel_files = sorted([f for f in os.listdir(input_dir) if "voxel" in f])
-label_files = sorted([f for f in os.listdir(input_dir) if "label" in f])
+label_files = sorted([f for f in os.listdir(input_dir) if "force" in f])
 
 # Load all the .npy files into lists
 voxel_data = [np.load(os.path.join(input_dir, f)) for f in voxel_files]
@@ -155,13 +157,22 @@ label_data = [np.load(os.path.join(input_dir, f)) for f in label_files]
 # Convert lists to numpy arrays and add channel dimension
 voxel_data_np = np.array(voxel_data)
 label_data_np = np.array(label_data)
+
+# Normalize label data
+label_mean = label_data_np.mean()
+label_std = label_data_np.std()
+label_data_np = (label_data_np - label_mean) / label_std
+
+# Save the normalization parameters for future use (if needed)
+# np.save("label_mean.npy", label_mean)
+# np.save("label_std.npy", label_std)
+
 voxel_data_np = np.expand_dims(voxel_data_np, axis=1)
 label_data_np = np.expand_dims(label_data_np, axis=1)
 
 # Split the data
 train_voxels, test_voxels, train_labels, test_labels = train_test_split(voxel_data_np, label_data_np, test_size=0.2, random_state=42)
 val_voxels, test_voxels, val_labels, test_labels = train_test_split(test_voxels, test_labels, test_size=0.5, random_state=42)
-
 
 # Convert numpy arrays to PyTorch tensors
 train_voxel_tensor = torch.Tensor(train_voxels)
@@ -175,7 +186,6 @@ test_label_tensor = torch.Tensor(test_labels)
 train_dataset = TensorDataset(train_voxel_tensor, train_label_tensor)
 val_dataset = TensorDataset(val_voxel_tensor, val_label_tensor)
 test_dataset = TensorDataset(test_voxel_tensor, test_label_tensor)
-
 
 # Create DataLoader
 train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
@@ -199,9 +209,11 @@ def train_fn(loader, model, optimizer, criterion, epoch):
 
         # Forward pass
         outputs, _ = model(data, epoch)
+        labels = labels.squeeze(1)  # This will remove the singleton dimension at position 1
+        labels = labels.permute(0, 4, 2, 3, 1)  # This moves the channel dimension to the correct position
 
         # Compute the primary loss
-        loss = criterion(outputs, labels.squeeze(1).long())
+        loss = criterion(outputs, labels)
 
         # Add the fractal loss from the pooling layer
         loss += model.pool.get_fractal_loss()
@@ -222,8 +234,10 @@ def val_fn(loader, model, criterion):
             data, labels = data.to(device), labels.to(device)
 
             outputs, _ = model(data, num_epochs)
+            labels = labels.squeeze(1)  # This will remove the singleton dimension at position 1
+            labels = labels.permute(0, 4, 2, 3, 1)  # This moves the channel dimension to the correct position
 
-            loss = criterion(outputs, labels.squeeze(1).long())
+            loss = criterion(outputs, labels)
             val_loss += loss.item()
 
     average_val_loss = val_loss / len(loader)
@@ -233,29 +247,36 @@ def val_fn(loader, model, criterion):
 def test_fn(loader, model, criterion):
     model.eval()
     test_loss = 0.0
-    total = 0
-    correct = 0
+    total_pred = 0.0
+    total_real = 0.0
+    total_samples = 0
+
     with torch.no_grad():
         for batch_idx, (data, labels) in enumerate(loader):
             data, labels = data.to(device), labels.to(device)
-
             outputs, _ = model(data, num_epochs)
 
-            loss = criterion(outputs, labels.squeeze(1).long())
+            labels = labels.squeeze(1)  # This will remove the singleton dimension at position 1
+            labels = labels.permute(0, 4, 2, 3, 1)  # This moves the channel dimension to the correct position
+
+            loss = criterion(outputs, labels)
             test_loss += loss.item()
 
-            _, predicted = torch.max(outputs, 1)
-            total += labels.nelement()
-            correct += predicted.eq(labels.squeeze(1).long()).sum().item()
+            # Sum the predicted and real values for calculating averages later
+            total_pred += torch.sum(outputs).item()
+            total_real += torch.sum(labels).item()
+            total_samples += labels.numel()
 
     average_test_loss = test_loss / len(loader)
-    accuracy = 100 * correct / total
-    print(f"Test Loss: {average_test_loss}")
-    print(f"Test Accuracy: {accuracy:.2f}%")
-
-    # compute RMSD
     rmsd = torch.sqrt(torch.tensor(average_test_loss))
+
+    avg_predicted_value = total_pred / total_samples
+    avg_real_value = total_real / total_samples
+
+    print(f"Test Loss (MSE): {average_test_loss}")
     print(f"RMSD: {rmsd.item()}")
+    print(f"Average Predicted Value: {avg_predicted_value}")
+    print(f"Average Ground Truth Value: {avg_real_value}")
 
 
 def load_new_file(file_path):
@@ -275,7 +296,7 @@ def inference(model, new_data, device):
 
 def main():
     # Initialize the U-Net model
-    model = UNET3D(in_channels=1, out_channels=4)
+    model = UNET3D(in_channels=1, out_channels=3)
     model.to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
@@ -283,18 +304,18 @@ def main():
                        gamma=0.95)  # This will decay the learning rate by a factor of 0.95 every 5 epochs
 
     # Initialize the loss function
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.MSELoss()
 
-    # for epoch in range(num_epochs):
-    #     train_fn(train_loader, model, optimizer, criterion, epoch)
-    #     val_fn(val_loader, model, criterion)
-    #     scheduler.step()
-    #
-    # # Test the model on the test set after all epochs
-    # test_fn(test_loader, model, criterion)
-    #
-    # # Save the model parameters
-    # torch.save(model.state_dict(), 'model_new_vox_2.pth')
+    for epoch in range(num_epochs):
+        train_fn(train_loader, model, optimizer, criterion, epoch)
+        val_fn(val_loader, model, criterion)
+        scheduler.step()
+
+    # Test the model on the test set after all epochs
+    test_fn(test_loader, model, criterion)
+
+    # Save the model parameters
+    torch.save(model.state_dict(), 'model_new_vox_2.pth')
 
     original_pdb_file = "C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//input_chig//chig.pdb"
     new_data_path = "C://Users//gemma//PycharmProjects//pythonProject1//new//voxel_data//chig//chig.npy"
