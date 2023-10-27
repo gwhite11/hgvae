@@ -14,6 +14,18 @@ class PoolGraph(torch.nn.Module):
         return torch_geometric.data.Data(x=x, edge_index=edge_index, batch=batch)
 
 
+def unpool(edge_index, perm):
+    # Reverse the permutation
+    rev_perm = torch.argsort(perm)
+
+    # This will use the reversed permutation to map the pooled edge indices back to
+    # their positions in the unpooled graph - for both rows of edge_index.
+    row_0 = torch.index_select(rev_perm, 0, edge_index[0])
+    row_1 = torch.index_select(rev_perm, 0, edge_index[1])
+
+    return torch.stack([row_0, row_1], dim=0)
+
+
 class PoolUnpoolGraph(torch.nn.Module):
     def __init__(self, num_node_features):
         super().__init__()
@@ -24,8 +36,7 @@ class PoolUnpoolGraph(torch.nn.Module):
 
         new_batch = batch[perm]
         x_unpooled = x[perm]
-        edge_index_unpooled = torch.stack([perm[edge_index_cg[0]],
-                                           perm[edge_index_cg[1]]], dim=0)
+        edge_index_unpooled = unpool(edge_index_cg, perm)
 
         return x_unpooled, x_cg, edge_index_unpooled, new_batch
 
