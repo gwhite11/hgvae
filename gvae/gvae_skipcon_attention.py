@@ -4,7 +4,7 @@ import torch_geometric
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, random_split
 from torch_geometric.data import Batch
-from torch.nn import Linear, Dropout, BatchNorm1d
+from torch.nn import Linear
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.decomposition import PCA
@@ -13,7 +13,7 @@ from sklearn.cluster import AgglomerativeClustering
 from scipy.cluster.hierarchy import dendrogram, linkage
 from collections import defaultdict
 from Bio.PDB import *
-from torch_geometric.nn import SAGEConv, SAGPooling, Sequential
+from torch_geometric.nn import SAGEConv, SAGPooling, GATConv
 
 
 # Pooling code
@@ -51,9 +51,9 @@ class PoolUnpoolGraph(torch.nn.Module):
 
 
 class VAE(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels, n_samples=10):
+    def __init__(self, in_channels, hidden_channels, out_channels, n_samples=10, heads=1):
         super(VAE, self).__init__()
-        self.dropout_prob = 0.5
+        self.dropout_prob = 0.49
         self.n_samples = n_samples
 
         # First-level Encoder
@@ -63,11 +63,10 @@ class VAE(torch.nn.Module):
             torch.nn.BatchNorm1d(hidden_channels)
         )
 
-        # Second-level Encoder
+        # Second-level Encoder with GAT
         self.encoder2 = torch.nn.Sequential(
-            SAGEConv(hidden_channels, hidden_channels),
-            torch.nn.Dropout(self.dropout_prob),
-            torch.nn.BatchNorm1d(hidden_channels)
+            GATConv(hidden_channels, hidden_channels, heads=heads, dropout=self.dropout_prob),
+            torch.nn.BatchNorm1d(hidden_channels * heads)  # Adjust for multi-head attention
         )
 
         # Third-level Encoder
@@ -109,7 +108,6 @@ class VAE(torch.nn.Module):
         # Second-level encoding
         x2 = F.relu(self.encoder2[0](x1, edge_index))
         x2 = self.encoder2[1](x2)
-        x2 = self.encoder2[2](x2)
 
         # Third-level encoding
         x3 = F.relu(self.encoder3[0](x2, edge_index))
@@ -285,46 +283,46 @@ if __name__ == '__main__':
 
     # Define the model
     in_channels = train_dataset[0].num_node_features
-    hidden_channels = 138
+    hidden_channels = 256
     out_channels = 28
     model = VAE(in_channels, hidden_channels, out_channels)
-    num_epochs = 10
+    num_epochs = 20
 
     # Set up the optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
-    # # Training loop
-    # for epoch in range(num_epochs):
-    #     train_loss = train_vae(model, train_loader, optimizer)
-    #     valid_loss = validate_vae(model, valid_loader)
-    #
-    #     print(f"Epoch: {epoch}, Train Loss: {train_loss}, Validation Loss: {valid_loss}")
-    #
-    # # Save the model parameters
-    # torch.save(model.state_dict(), 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//new_vae.pth')
-    #
-    # # testing code:
-    #
-    # # Step 1: Load the model's saved state
-    # model_path = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//new_vae.pth'
-    # model = VAE(in_channels, hidden_channels, out_channels)
-    # model.load_state_dict(torch.load(model_path))
-    # model.eval()
-    #
-    # # Step 2: Initialize the DataLoader for the test set
-    # test_dataset = CustomGraphDataset(data_folder, numerical_indicies)
-    # test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, drop_last=True, num_workers=0,
-    #                          collate_fn=collate_fn)
-    #
-    # # Step 3: Evaluate the model on the test set using RMSD
-    # test_rmsd = test_vae_rmsd(model, test_loader)
-    # print(f"Test RMSD: {test_rmsd}")
-    #
-    # # Define the model
-    # model = VAE(in_channels, hidden_channels, out_channels)
+    # Training loop
+    for epoch in range(num_epochs):
+        train_loss = train_vae(model, train_loader, optimizer)
+        valid_loss = validate_vae(model, valid_loader)
+
+        print(f"Epoch: {epoch}, Train Loss: {train_loss}, Validation Loss: {valid_loss}")
+
+    # Save the model parameters
+    torch.save(model.state_dict(), '/autoencoder/new_vae_2.pth')
+
+    # testing code:
+
+    # Step 1: Load the model's saved state
+    model_path = '/autoencoder/new_vae_2.pth'
+    model = VAE(in_channels, hidden_channels, out_channels)
+    model.load_state_dict(torch.load(model_path))
+    model.eval()
+
+    # Step 2: Initialize the DataLoader for the test set
+    test_dataset = CustomGraphDataset(data_folder, numerical_indicies)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, drop_last=True, num_workers=0,
+                             collate_fn=collate_fn)
+
+    # Step 3: Evaluate the model on the test set using RMSD
+    test_rmsd = test_vae_rmsd(model, test_loader)
+    print(f"Test RMSD: {test_rmsd}")
+
+    # Define the model
+    model = VAE(in_channels, hidden_channels, out_channels)
 
     # Load the model parameters
-    model.load_state_dict(torch.load('C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//new_vae.pth'))
+    model.load_state_dict(torch.load('/autoencoder/new_vae_2.pth'))
 
     new_graph = "C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//chi_energy//chig_1.pdb.pt"
     original_pdb = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//input_chig_with_forces//chig_1.pdb'
@@ -383,7 +381,7 @@ if __name__ == '__main__':
     labels = cluster.fit_predict(combined_embeddings)
 
 
-def list_atoms_per_cluster(labels, atom_info, output_file="clusters_info_15.txt"):
+def list_atoms_per_cluster(labels, atom_info, output_file="clusters_info_16.txt"):
     # Create a dictionary to store atom info for each cluster
     clusters_dict = defaultdict(list)
 
@@ -429,7 +427,7 @@ def generate_colored_pdb(labels, original_pdb_path, output_pdb_path):
 
 
 # Specify the path for the new PDB file
-output_pdb_path = "colored_clusters_15.pdb"
+output_pdb_path = "../autoencoder/colored_clusters_16.pdb"
 original_pdb = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//input_chig_with_forces//chig_1.pdb'
 
 # Generate the colored PDB file

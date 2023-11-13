@@ -134,7 +134,7 @@ def pdb_to_pyg_data(pdb_file, output_directory):
     edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
     edge_attr = torch.tensor(edge_attr, dtype=torch.float)
 
-    # Create PyTorch Geometric Data object without `y` for energies since they are now part of node features
+    # Create PyTorch Geometric Data object
     data = Data(x=node_features, edge_index=edge_index, edge_attr=edge_attr)
 
     # Save the graph data
@@ -145,10 +145,10 @@ def pdb_to_pyg_data(pdb_file, output_directory):
 
 
 # Specify the path to your directory with pdb files
-pdb_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//input_chig_with_forces'
+pdb_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//input_energy_5'
 
 # Specify the path to your output directory
-output_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//chi_energy'
+output_directory = 'C://Users//gemma//PycharmProjects//pythonProject1//autoencoder//pdb_files//graphs_energy_no_y'
 
 # Get all pdb files in the directory
 pdb_files = glob.glob(os.path.join(pdb_directory, '*.pdb'))
